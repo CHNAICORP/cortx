@@ -17,10 +17,10 @@
 |---|--------|-----------|
 | 位置 | `python/cortex_agent/` | `src/` |
 | 工具数 | 43 | 43 |
-| 安装 | `pip install ctx` | `npm install -g cortex-agent` |
-| CLI 命令 | `ctx` (仅 3 字母 👑) | `ctx` |
+| 安装 | `pip install ctx` | `npm install -g @chnaicorp/ctx` |
+| CLI 命令 | `ctx` | `ctx` |
 
-> 💡 **PyPI: `pip install ctx`（短名可用），npm: `npm install -g cortex-agent`（`ctx` 被占）。日常运行仅需 `ctx`**
+> 💡 **PyPI: `pip install ctx`，npm: `npm install -g @chnaicorp/ctx`。运行只需 `ctx`**
 
 ---
 
@@ -32,7 +32,7 @@ pip install ctx
 ctx
 
 # TypeScript
-npm install -g cortex-agent
+npm install -g @chnaicorp/ctx
 ctx
 npm install -g ctx # TypeScript
 
