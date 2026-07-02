@@ -46,6 +46,15 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (args.includes("--update")) {
+    const pkg = require("../../package.json");
+    console.log(`当前: cortx ${pkg.version} (TypeScript)`);
+    console.log("更新: npm install -g @chnaicorp/cortx@latest");
+    const { execSync } = require("child_process");
+    execSync("npm install -g @chnaicorp/cortx@latest", { stdio: "inherit" });
+    return;
+  }
+
   await loadTools();
 
   const settings = loadSettings();

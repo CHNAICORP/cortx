@@ -59,6 +59,7 @@ def main():
 
     p = argparse.ArgumentParser(description="Cortex Agent")
     p.add_argument("-V", "--version", action="store_true", help="显示版本号")
+    p.add_argument("--update", action="store_true", help="更新 cortx 到最新版本")
     p.add_argument("--model", default=None, help="模型别名 (覆盖 settings.json)")
     p.add_argument("--work-dir", default=None, help="工作目录")
     p.add_argument("--max-steps", type=int, default=10)
@@ -75,6 +76,12 @@ def main():
     if args.version:
         print(f"cortx {__import__('cortex_agent').__version__} (Python)")
         return
+
+    if args.update:
+        import subprocess, sys as _sys
+        print(f"当前: cortx {__import__('cortex_agent').__version__}")
+        print("正在更新...")
+        _sys.exit(subprocess.call([_sys.executable, "-m", "pip", "install", "cortx", "--upgrade"]))
 
     if args.init_config:
         cfg_path = os.path.join(os.getcwd(), ".cortex", "settings.json")
