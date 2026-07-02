@@ -1,0 +1,17 @@
+# Exclude source and dev files — only ship runtime
+python/
+src/
+*.py
+*.toml
+*.txt
+.cortex/
+cortex_workspace/
+__pycache__/
+node_modules/
+dist/*.whl
+dist/*.tar.gz
+dist/*.map
+dist/*.d.ts
+docs/
+*.tgz
+.npmrc
