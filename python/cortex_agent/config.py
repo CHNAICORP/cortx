@@ -87,7 +87,7 @@ def load_settings(project_dir: str = None) -> dict:
 
 def apply_to_config(config, settings: dict):
     """将 settings dict 应用到 AgentConfig 对象。"""
-    from cortex_agent import LLMProvider
+    from .cortex_agent import LLMProvider
 
     # Provider 注册
     LLMProvider.setup(

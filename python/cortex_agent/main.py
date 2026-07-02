@@ -13,17 +13,17 @@ Cortex Agent CLI — 入口 + 工厂函数
 """
 
 import os, sys, sqlite3, glob as _glob
-from cortex_agent import CortexAgent, AgentConfig, LLMProvider, registry
-from terminal import Terminal
-from config import load_settings, apply_to_config, create_default_settings
+from .cortex_agent import CortexAgent, AgentConfig, LLMProvider, registry
+from .terminal import Terminal
+from .config import load_settings, apply_to_config, create_default_settings
 
 # 导入所有工具模块以触发工具注册
-import tools as _
-import tools_mcp as _
-import tools_browser as _
-import tools_computer as _
-import tools_network as _
-import tools_rag as _
+from . import tools as _
+from . import tools_mcp as _
+from . import tools_browser as _
+from . import tools_computer as _
+from . import tools_network as _
+from . import tools_rag as _
 del _
 
 

@@ -6,7 +6,7 @@ set_proxy / unset_proxy / show_proxy / pip_mirror / npm_mirror
 """
 
 import os, sys, subprocess
-from cortex_agent import registry, RiskLevel, Capability
+from .cortex_agent import registry, RiskLevel, Capability
 
 _PROXY_STORE = {}
 

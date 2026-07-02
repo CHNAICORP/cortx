@@ -372,7 +372,7 @@ class CortexAgent:
         self.policy = PolicyEngine(wd, self.config)
         self.executor = ToolExecutor(registry, wd, self.config.tool_timeout)
         # ── Runtime state (工作区 = 运行时产物) ──
-        import memory as mem_module
+        from . import memory as mem_module
         cwd = os.getcwd()
         # 记忆/会话/目标 → cortex_workspace/ (运行时产物)
         memory_path = self.config.memory_dir or os.path.join(wd, 'memory.md')
@@ -382,7 +382,7 @@ class CortexAgent:
         self.memory = mem_module.MemoryStore(memory_path) if self.config.memory_enabled else None
         self.sessions = mem_module.SessionStore(sessions_dir) if self.config.sessions_enabled else None
         # 技能/配置 → .cortex/ (项目配置, Git 追踪)
-        import skills as _skills
+        from . import skills as _skills
         skills_dir = self.config.skills_dir or os.path.join(cwd, '.cortex', 'skills')
         self.skill_mgr = _skills.SkillManager()
         self.skill_mgr.SKILLS_DIR = skills_dir
@@ -736,5 +736,5 @@ class CortexAgent:
             return ""
 
 # ── 延迟导入（避免循环依赖）──
-from policy import PolicyEngine
-from llm import LLMProvider
+from .policy import PolicyEngine
+from .llm import LLMProvider

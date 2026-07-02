@@ -7,7 +7,7 @@ mcp_list_servers / mcp_list_tools / mcp_call_tool
 """
 
 import os, re, sys, json, shlex, platform, subprocess
-from cortex_agent import registry, RiskLevel, Capability
+from .cortex_agent import registry, RiskLevel, Capability
 
 
 # ══════════════════════════════════════════════════════════════
@@ -73,7 +73,7 @@ def _mcp_exchange(server_cmd: list, requests: list, timeout: float = 15.0) -> li
     "从 settings.json 读取 mcpServers 段 + MCP_REGISTRY 内置注册表。",
     risk=RiskLevel.SAFE, capability=Capability.FS_READ)
 def mcp_list_servers(work_dir: str) -> str:
-    import config as cfg
+    from . import config as cfg
     settings = cfg.load_settings()
     configured = settings.get("mcpServers", {})
     lines = []
@@ -382,7 +382,7 @@ def mcp_install(work_dir: str, server: str = "") -> str:
 
 def _add_mcp_to_settings(key: str, info: dict):
     """将 MCP server 添加到 settings.json 的 mcpServers 段。"""
-    import config as cfg
+    from . import config as cfg
     settings_path = os.path.join(os.path.dirname(os.path.abspath(work_dir := '.')), '.cortex', 'settings.json')
     # 尝试找到实际 settings.json
     for candidate in [os.path.join(os.getcwd(), '.cortex', 'settings.json'),

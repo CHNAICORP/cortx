@@ -7,7 +7,7 @@ rebuild_knowledge_index: 重建索引
 """
 
 import os, sqlite3, re as _re
-from cortex_agent import registry, RiskLevel, Capability
+from .cortex_agent import registry, RiskLevel, Capability
 
 _fts5_indexed = False
 

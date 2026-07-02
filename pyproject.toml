@@ -36,13 +36,8 @@ dev = [
 ]
 
 [project.scripts]
-cortex-agent = "main:main"
-ctx = "main:main"
+cortex-agent = "cortex_agent.main:main"
+ctx = "cortex_agent.main:main"
 
-[tool.setuptools]
-py-modules = [
-    "config", "cortex_agent", "llm", "main", "memory",
-    "policy", "skills", "terminal",
-    "tools", "tools_browser", "tools_computer", "tools_mcp", "tools_network",
-    "tools_rag"
-]
+[tool.setuptools.packages.find]
+where = ["python"]

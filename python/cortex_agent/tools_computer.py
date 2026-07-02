@@ -6,7 +6,7 @@ computer_screenshot / computer_click
 """
 
 import os, subprocess
-from cortex_agent import registry, RiskLevel, Capability
+from .cortex_agent import registry, RiskLevel, Capability
 
 
 # ══════════════════════════════════════════════════════════════

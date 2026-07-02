@@ -7,7 +7,7 @@ browser_navigate / browser_snapshot / browser_screenshot
 """
 
 import os, re, json, http.client, urllib.parse, base64, socket, struct, random as _random
-from cortex_agent import registry, RiskLevel, Capability
+from .cortex_agent import registry, RiskLevel, Capability
 
 _browser_ws_url = None
 

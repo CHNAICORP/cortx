@@ -16,7 +16,7 @@ Cortex Agent 工具实现 — 所有工具注册到 registry
 
 import os, re, shlex, sqlite3, platform, subprocess, datetime, json, csv, io
 import urllib.parse, urllib.request, urllib.error
-from cortex_agent import registry, RiskLevel, Capability, check_ssrf
+from .cortex_agent import registry, RiskLevel, Capability, check_ssrf
 
 _tasks = []  # 模块级简单任务存储
 
@@ -264,9 +264,9 @@ def web_fetch(work_dir: str, url: str) -> str:
 # ══════════════════════════════════════════════════════════════
 
 def _get_memory_store(work_dir: str):
-    try: from memory import MemoryStore
+    try: from .memory import MemoryStore
     except ImportError: return None
-    import cortex_agent as ca
+    from . from . import cortex_agent as ca
     memory_path = getattr(ca, '_project_memory_path', None)
     if not memory_path:
         memory_path = os.path.join(os.path.dirname(os.path.abspath(work_dir)), '.cortex', 'memory.md')
