@@ -34,3 +34,4 @@ Thumbs.db
 
 # npm
 node_modules/
+agent.db
