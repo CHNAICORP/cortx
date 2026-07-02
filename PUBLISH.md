@@ -1,5 +1,7 @@
 # 发布指南
 
+> **当前版本: 1.0.0**
+
 ## 包名 vs CLI 命令
 
 | | 包名 | CLI 命令 | 原因 |
@@ -106,14 +108,16 @@ ctx --no-stream -q "hello"
 同步更新 3 个文件的版本号：
 
 ```bash
+# 当前版本: 1.0.0，以下示例升级到 1.0.1
+
 # pyproject.toml
-version = "1.0.1"
+version = "1.0.1"          # 修改此行
 
 # package.json
-"version": "1.0.1"
+"version": "1.0.1"         # 修改此行
 
-# python/cortex_agent/__init__.py (可选)
-__version__ = "1.0.1"
+# python/cortex_agent/__init__.py
+__version__ = "1.0.1"      # 修改此行
 ```
 
 ### 3.2 构建 + 发布双平台
