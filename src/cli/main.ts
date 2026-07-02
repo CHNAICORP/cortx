@@ -146,8 +146,12 @@ async function main(): Promise<void> {
   });
 
   const term = new Terminal();
+  // 始终设置 term：_requestConfirmation 需要 term 来显示权限提示
   agent.setTerm(term);
-  term.banner(agent.config.model, registry.schemaList.length, agent.config.workDir, agent.config.permissionMode);
+  // 仅在流式模式显示 banner 和流式输出
+  if (!noStream) {
+    term.banner(agent.config.model, registry.schemaList.length, agent.config.workDir, agent.config.permissionMode);
+  }
 
   if (query) {
     const answer = await agent.run(query);

@@ -5,6 +5,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
+import * as readline from "readline";
 import {
   AgentConfig, DEFAULT_CONFIG, Capability, AuditVerdict,
   Message, RunTrace, StepRecord, CacheStats,
@@ -276,6 +277,45 @@ export class CortexAgent {
     this.trace = null;
   }
 
+  // ── 交互式权限确认（与 Python _request_confirmation 完全对应）──
+  private async _requestConfirmation(toolName: string, args: Record<string, unknown>, capability: string): Promise<boolean> {
+    const safeArgs: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(args)) {
+      if (k !== "workDir" && k !== "work_dir") safeArgs[k] = v;
+    }
+    const key = `${toolName}:${JSON.stringify(Object.entries(safeArgs).sort())}`;
+    if (this.config.permissionRemember && this.permissionDecisions.has(key)) {
+      return this.permissionDecisions.get(key)!;
+    }
+    if (!this.term) return false;
+
+    this.term.closeThinking();
+    const pathHint = String(args["path"] || args["url"] || args["command"] || "").slice(0, 40);
+    process.stdout.write(`\n  \x1b[33m⚠ 需要授权:\x1b[0m  \x1b[36m▸ ${toolName}\x1b[0m [${capability}]\n`);
+    process.stdout.write(`     \x1b[90m${pathHint}\x1b[0m\n`);
+    process.stdout.write(`     [\x1b[32mY\x1b[0m/\x1b[31mn\x1b[0m/\x1b[32malways\x1b[0m/\x1b[31mdeny\x1b[0m] `);
+
+    try {
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const ans = await new Promise<string>(resolve => {
+        rl.question('', resolve);
+      });
+      rl.close();
+      const trimmed = ans.trim().toLowerCase();
+      if (trimmed === "always") {
+        this.permissionDecisions.set(key, true);
+        return true;
+      }
+      if (trimmed === "deny") {
+        this.permissionDecisions.set(key, false);
+        return false;
+      }
+      return trimmed === "y" || trimmed === "yes";
+    } catch {
+      return false;
+    }
+  }
+
   private async _loop(maxSteps: number): Promise<string> {
     this.trace = this.observer.createTrace(this.ctx[this.ctx.length - 1]?.content || "");
 
@@ -321,14 +361,21 @@ export class CortexAgent {
           [ok, reason] = this.policy.audit(tc.name, tc.args);
         }
 
-        // CONFIRM → auto-allow if permission mode allows (non-interactive bypass)
-        // In yolo/auto-edit mode, CONFIRM becomes ALLOW
-        // In standard mode, CONFIRM stays as auto-deny in non-interactive
+        // CONFIRM → 根据权限模式决定
+        // yolo/auto-edit: 自动放行
+        // standard 有终端交互: 弹出用户授权确认界面
+        // standard 无交互（--no-stream）: 自动拒绝
         if (!ok && reason === "confirm") {
           if (this.config.permissionMode === "yolo" || this.config.permissionMode === "auto-edit") {
             ok = true; reason = "";
           } else {
-            ok = false; reason = "用户拒绝";
+            // standard 模式，尝试交互式确认
+            try {
+              ok = await this._requestConfirmation(tc.name, tc.args, capStr);
+              reason = ok ? "用户授权" : "用户拒绝";
+            } catch {
+              ok = false; reason = "用户拒绝";
+            }
           }
         }
 
