@@ -14,8 +14,8 @@
     "cli"
   ],
   "bin": {
-    "cortex-agent": "./bin/cortex-agent.js",
-    "ctx": "./bin/cortex-agent.js"
+    "cortex-agent": "./dist/cli/main.js",
+    "ctx": "./dist/cli/main.js"
   },
   "scripts": {
     "postinstall": "node bin/postinstall.js"

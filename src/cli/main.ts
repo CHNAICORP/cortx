@@ -6,6 +6,7 @@
 import * as readline from "readline";
 import { CortexAgent, LLMProvider } from "../core/loop";
 import { registry } from "../core/registry";
+import { loadSettings, getApiKey, getBaseUrl } from "../config";
 
 // Register tools (lazy import to avoid circular deps)
 async function loadTools(): Promise<void> {
@@ -41,15 +42,22 @@ async function main(): Promise<void> {
 
   await loadTools();
 
+  const settings = loadSettings();
   const modelIdx = args.indexOf("--model");
-  const model = modelIdx >= 0 ? (args[modelIdx + 1] || "pro") : "pro";
+  const model = modelIdx >= 0 ? (args[modelIdx + 1] || "pro") : (settings.model || "pro");
   const queryIdx = args.indexOf("-q");
   const query = queryIdx >= 0 ? args[queryIdx + 1] : null;
   const noStream = args.includes("--no-stream");
+  const modeIdx = args.indexOf("--mode");
+  const permissionMode = (modeIdx >= 0 ? args[modeIdx + 1] : settings.permission_mode || "standard") as "standard" | "auto-edit" | "yolo";
 
   const agent = new CortexAgent({
+    apiKey: getApiKey(settings),
+    baseUrl: getBaseUrl(settings),
     model: LLMProvider.resolve(model),
-    workDir: "./cortex_workspace",
+    workDir: (settings.work_dir as string) || "./cortex_workspace",
+    permissionMode,
+    contextLimit: (settings.context_limit as number) || 1_000_000,
   });
 
   if (query) {
