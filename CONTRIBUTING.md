@@ -1,47 +1,65 @@
 # Contributing to Cortex Agent
 
-欢迎贡献！以下是参与指南。
+欢迎贡献！Cortex Agent 支持 Python 和 TypeScript 双语言。
 
 ## 开发环境
 
 ```bash
 git clone https://github.com/<user>/cortex-agent.git
 cd cortex-agent
-pip install -r requirements.txt
+
+# Python
+pip install -e .
+ctx --model pro
+
+# TypeScript
+npm install
+npx tsc
+node dist/cli/main.js
 ```
 
-## 项目规范
+## 项目结构
 
-- **每文件 ≤ 800 行** — 保持模块小而专注
-- **Python 3.10+** — 使用现代语法
-- **零外部 Agent 框架依赖** — 核心引擎自包含
+```
+python/cortex_agent/     # Python 包 (相对导入)
+src/                     # TypeScript 包 (node16 模块)
+```
 
-## 模块分类
+## 代码规范
 
-| 层 | 文件 | 职责 |
-|---|------|------|
-| 引擎层 | `cortex_agent.py` `policy.py` `llm.py` | Agentic Loop / 安全 / LLM |
-| 工具层 | `tools*.py` | 按能力域拆分 |
-| 交互层 | `main.py` `terminal.py` | CLI / 终端 |
-| 持久层 | `memory.py` `config.py` `skills.py` | 状态 / 配置 / 技能 |
+- **每文件 ≤ 800 行** — Python 和 TypeScript 统一标准
+- **Python 3.10+** — 使用现代语法，包内相对导入
+- **TypeScript 5.x + Node 24** — 严格模式，`module: node16`
 
 ## 添加新工具
 
-1. 选择合适的 `tools_*.py` 模块（或新建）
-2. 使用 `@registry.register()` 装饰器注册
-3. 指定 `risk` 和 `capability`
-4. 在 `policy.py` 的 `PATH_PARAMS` 中注册路径参数名
+### Python
 
 ```python
-@registry.register(
-    "工具描述",
-    risk=RiskLevel.SAFE,
-    capability=Capability.FS_READ)
+# 在 python/cortex_agent/tools_xxx.py 中
+from .cortex_agent import registry, RiskLevel, Capability
+
+@registry.register("工具描述", risk=RiskLevel.SAFE, capability=Capability.FS_READ)
 def my_tool(work_dir: str, ...) -> str:
     ...
 ```
 
-## 添加新技能
+### TypeScript
+
+```typescript
+// 在 src/tools/xxx.ts 中
+import { registry } from "../core/registry.js";
+import { RiskLevel, Capability } from "../core/types.js";
+
+registry.register("工具描述", RiskLevel.SAFE, Capability.FS_READ,
+  { workDir: "string" },
+  function my_tool(workDir: string, args: Record<string, unknown>): string {
+    ...
+  },
+);
+```
+
+## 添加自定义技能
 
 在 `.cortex/skills/` 创建 `.md` 文件：
 
@@ -55,10 +73,9 @@ def my_tool(work_dir: str, ...) -> str:
 详细的 prompt 内容...
 ```
 
-## 提交规范
+## 双语言同步
 
-- 提交信息使用中文或英文均可
-- 涉及安全相关修改请在 PR 中标注
+两个版本功能平价（43 工具），新增工具需同时在 Python 和 TypeScript 实现。
 
 ## License
 
