@@ -78,7 +78,7 @@ export class Terminal {
     const modeIcons: Record<string, string> = { standard: "🛡️", "auto-edit": "✏️", yolo: "⚠️" };
     this.write(`\n${Terminal.CYAN}${"=".repeat(48)}${Terminal.RESET}\n`);
     this.write(`  Cortex Agent  ${Terminal.GREEN}${model}${Terminal.RESET}  ${Terminal.GRAY}${tools} tools  🟦 TypeScript${Terminal.RESET}\n`);
-    this.write(`  权限: ${modeColors[mode] || Terminal.GRAY}${modeIcons[mode] || "?"} ${mode}${Terminal.RESET}  ${Terminal.GRAY}(/mode 切换)${Terminal.RESET}\n`);
+    this.write(`  权限: ${modeColors[mode] || Terminal.GRAY}${modeIcons[mode] || "?"} ${mode}${Terminal.RESET}  ${Terminal.GRAY}(Shift+Tab 切换)${Terminal.RESET}\n`);
     if (sessionId) this.write(`  Session: ${Terminal.GRAY}${sessionId}${Terminal.RESET}\n`);
     this.write(`  ${Terminal.GRAY}${workDir}${Terminal.RESET}\n`);
     this.write(`${Terminal.CYAN}${"=".repeat(48)}${Terminal.RESET}\n`);

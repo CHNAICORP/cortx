@@ -158,14 +158,10 @@ async function main(): Promise<void> {
   // Listen for Shift+Tab (\x1b[Z) to cycle permission mode
   process.stdin.on("keypress", (_str, key) => {
     if (key && key.name === "tab" && key.shift) {
-      // Cycle: standard → auto-edit → yolo → standard
       const modes = ["standard", "auto-edit", "yolo"];
       const idx = modes.indexOf(agent.config.permissionMode);
       const next = modes[(idx + 1) % 3] as "standard" | "auto-edit" | "yolo";
       agent.config.permissionMode = next;
-      const modeNames: Record<string, string> = { standard: "standard", "auto-edit": "auto-edit", yolo: "yolo" };
-      console.log(`\n  → ${modeNames[next]}`);
-      rl.write(null as unknown as string, { ctrl: true, name: "u" }); // clear line
       showPrompt();
       rl.prompt();
     }
