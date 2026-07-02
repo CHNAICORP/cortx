@@ -1,0 +1,34 @@
+{
+  "name": "cortex-agent",
+  "version": "1.0.0",
+  "description": "AI Agent runtime — Harness Agent architecture + Agentic Loop engine (Python)",
+  "homepage": "https://github.com/<user>/cortex-agent#readme",
+  "license": "MIT",
+  "keywords": [
+    "ai-agent",
+    "llm",
+    "agent-framework",
+    "harness",
+    "agentic-loop",
+    "mcp",
+    "cli"
+  ],
+  "bin": {
+    "cortex-agent": "./bin/cortex-agent.js"
+  },
+  "scripts": {
+    "postinstall": "node bin/postinstall.js"
+  },
+  "files": [
+    "bin/",
+    "package.json",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/<user>/cortex-agent.git"
+  }
+}

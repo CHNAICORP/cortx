@@ -31,3 +31,6 @@ cortex_workspace/*
 # OS
 .DS_Store
 Thumbs.db
+
+# npm
+node_modules/
