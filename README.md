@@ -1,4 +1,4 @@
-# Cortex Agent
+# Cortx
 
 安全可控的 AI Agent 运行时 — **Harness Agent 架构 + Agentic Loop 引擎**
 

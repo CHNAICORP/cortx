@@ -1,4 +1,4 @@
-# Cortex Agent — Harness Agent 架构 + Agentic Loop 运行时
+# Cortx — Harness Agent 架构 + Agentic Loop 运行时
 
 ## 命名由来
 

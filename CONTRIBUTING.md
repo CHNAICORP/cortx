@@ -1,4 +1,4 @@
-# Contributing to Cortex Agent
+# Contributing to Cortx
 
 欢迎贡献！Cortex Agent 支持 Python 和 TypeScript 双语言。
 
