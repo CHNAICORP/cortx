@@ -37,6 +37,7 @@ dev = [
 
 [project.scripts]
 cortex-agent = "main:main"
+ctx = "main:main"
 
 [tool.setuptools]
 py-modules = [
