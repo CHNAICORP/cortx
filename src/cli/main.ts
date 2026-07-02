@@ -143,6 +143,9 @@ async function main(): Promise<void> {
     workDir: (settings.work_dir as string) || "./cortex_workspace",
     permissionMode,
     contextLimit: (settings.context_limit as number) || 1_000_000,
+    memoryEnabled: settings.memory_enabled !== false,
+    sessionsEnabled: settings.sessions_enabled !== false,
+    autoExtractMemory: settings.auto_extract_memory !== false,
   });
 
   const term = new Terminal();
@@ -153,6 +156,10 @@ async function main(): Promise<void> {
     term.banner(agent.config.model, registry.schemaList.length, agent.config.workDir, agent.config.permissionMode);
   }
 
+  // ── Session init ──
+  const newSession = args.includes("--new-session");
+  agent.initSession(undefined, !newSession);  // 默认尝试恢复
+
   if (query) {
     const answer = await agent.run(query);
     console.log(answer);
@@ -160,6 +167,10 @@ async function main(): Promise<void> {
     if (trace?.steps.length) {
       const totalMs = trace.steps.reduce((s, st) => s + st.latencyMs, 0);
       console.error(`\n[审计] ${trace.steps.length} 步, ${totalMs.toFixed(0)}ms`);
+    }
+    // 单次查询退出前打印 session ID
+    if (agent.sessionIdStr) {
+      console.error(`[会话] ${agent.sessionIdStr}`);
     }
     return;
   }
@@ -194,7 +205,12 @@ async function main(): Promise<void> {
   for await (const line of rl) {
     const q = line.trim();
     if (!q) { showPrompt(); rl.prompt(); continue; }
-    if (["/exit", "/quit", "/q"].includes(q)) break;
+    if (["/exit", "/quit", "/q"].includes(q)) {
+      agent.saveSession();
+      const sid = agent.sessionIdStr || "?";
+      console.log(`\x1b[33mBye.\x1b[0m  \x1b[90mSession: ${sid}\x1b[0m`);
+      break;
+    }
     if (["/help", "/h"].includes(q)) { console.log(USAGE); showPrompt(); rl.prompt(); continue; }
 
     try {
@@ -206,7 +222,9 @@ async function main(): Promise<void> {
     showPrompt();
     rl.prompt();
   }
-  console.log("Bye.");
+  agent.saveSession();
+  const sid = agent.sessionIdStr || "?";
+  console.log(`\x1b[33mBye.\x1b[0m  \x1b[90mSession: ${sid}\x1b[0m`);
   rl.close();
 }
 

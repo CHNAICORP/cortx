@@ -211,6 +211,8 @@ def main():
         if args.no_stream: print(ans)
         t = agent.last_trace()
         if t and t.steps: print(f"\n[审计] {len(t.steps)} 步, {sum(s.latency_ms for s in t.steps):.0f}ms")
+        if agent.session_id:
+            print(f"[会话] {agent.session_id}")
         return
 
     # REPL

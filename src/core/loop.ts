@@ -2,6 +2,7 @@
  * Cortex Agent — Agentic Loop 引擎
  * 与 Python cortex_agent.py 完全对应: Think → Guard → Act → Reflect
  */
+
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -13,6 +14,8 @@ import {
 import { registry } from './registry.js';
 import { PolicyEngine } from './policy.js';
 import { LLMProvider, ParsedToolCall } from './llm.js';
+export { LLMProvider } from './llm.js';
+import { MemoryStore, SessionStore } from './memory_store.js';
 
 // ── 默认系统提示 ──
 const DEFAULT_SYSTEM = [
@@ -53,6 +56,33 @@ class ContextGovernor {
     this.contextLimit = opts.contextLimit || 1_000_000;
   }
 
+  static estimateTokens(msgs: Message[]): number {
+    let total = 0;
+    for (const m of msgs) {
+      let content = m.content || "";
+      if (m.tool_calls) {
+        content += JSON.stringify(m.tool_calls.map(tc => tc.function));
+      }
+      if (typeof content === "string") {
+        total += Math.floor(content.length * ContextGovernor.TOKENS_PER_CHAR);
+      }
+    }
+    return Math.max(total, 1);
+  }
+
+  static contextPct(msgs: Message[], limit: number): number {
+    const est = ContextGovernor.estimateTokens(msgs);
+    return Math.min(Math.floor(est / limit * 100), 99);
+  }
+
+  static loadKb(projectDir: string): string {
+    const kbPath = path.join(projectDir, "CORTEX.md");
+    if (fs.existsSync(kbPath)) {
+      try { return fs.readFileSync(kbPath, "utf-8"); } catch { /* ignore */ }
+    }
+    return "";
+  }
+
   init(query: string): Message[] {
     return [this.system, { role: "user", content: query }];
   }
@@ -65,7 +95,7 @@ class ContextGovernor {
   govern(msgs: Message[]): Message[] {
     if (msgs.length <= this.maxMsgs) return msgs;
     const limit = this.maxMsgs - 1;
-    let reserve = new Set<number>();
+    let reserve: Set<number> = new Set();
     let hasPair = false;
     for (let i = msgs.length - 1; i > 1; i--) {
       if (msgs[i].role === "tool" && msgs[i - 1].tool_calls) {
@@ -91,30 +121,6 @@ class ContextGovernor {
     }
     return [msgs[0], ...kept];
   }
-
-  static estimateTokens(msgs: Message[]): number {
-    let total = 0;
-    for (const m of msgs) {
-      let content = m.content || "";
-      if (m.tool_calls) content += JSON.stringify(m.tool_calls);
-      total += Math.floor(content.length * ContextGovernor.TOKENS_PER_CHAR);
-    }
-    return Math.max(total, 1);
-  }
-
-  static contextPct(msgs: Message[], limit: number): number {
-    return Math.min(Math.floor(ContextGovernor.estimateTokens(msgs) / limit * 100), 99);
-  }
-
-  static loadKb(projectDir: string): string {
-    const kbPath = path.join(projectDir, "CORTEX.md");
-    if (fs.existsSync(kbPath)) {
-      try {
-        return fs.readFileSync(kbPath, "utf-8");
-      } catch { /* ignore */ }
-    }
-    return "";
-  }
 }
 
 // ── Observer ──
@@ -122,32 +128,17 @@ class Observer {
   traces: RunTrace[] = [];
 
   createTrace(query: string): RunTrace {
-    const t: RunTrace = {
-      query,
-      steps: [],
-      startTime: Date.now(),
-      finalAnswer: "",
-      stepLimitReached: false,
-      error: "",
-    };
+    const t: RunTrace = { query, steps: [], startTime: Date.now(), finalAnswer: "", stepLimitReached: false, error: "" };
     this.traces.push(t);
     return t;
   }
 
-  record(
-    trace: RunTrace, step: number, name: string, args: Record<string, unknown>,
-    result: string, success: boolean, cap: string, latencyMs: number,
-  ): void {
+  record(trace: RunTrace, step: number, name: string, args: Record<string, unknown>,
+    result: string, success: boolean, cap: string, latencyMs: number): void {
     trace.steps.push({
-      step,
-      timestamp: Date.now(),
-      toolName: name,
-      toolArgs: args,
-      resultPreview: result.slice(0, 200),
-      success,
-      riskLevel: "",
-      capability: cap,
-      latencyMs,
+      step, timestamp: Date.now(), toolName: name, toolArgs: args,
+      resultPreview: result.slice(0, 200), success,
+      riskLevel: "", capability: cap, latencyMs,
     });
   }
 }
@@ -155,29 +146,27 @@ class Observer {
 // ── ToolExecutor ──
 class ToolExecutor {
   static MAX_RESULT_CHARS = 3000;
+  private reg: typeof registry;
   private workDir: string;
   private timeout: number;
 
-  constructor(workDir: string, timeout: number) {
+  constructor(workDir: string, timeout = 10) {
+    this.reg = registry;
     this.workDir = workDir;
     this.timeout = timeout;
   }
 
   execute(name: string, args: Record<string, unknown>): string | Promise<string> {
-    const fn = registry.get(name);
+    const fn = this.reg.get(name);
     if (!fn) return `(x) 未知工具: ${name}`;
     try {
-      const clean: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(args)) {
-        if (k !== "workDir") clean[k] = v;
-      }
-      const result = fn(this.workDir, clean);
+      const result = fn(this.workDir, args);
       if (result instanceof Promise) {
-        return result.then((r) => this.truncate(String(r)));
+        return result.then(r => this.truncate(r));
       }
-      return this.truncate(String(result));
-    } catch (e: unknown) {
-      return `(x) ${e instanceof Error ? e.message : String(e)}`;
+      return this.truncate(result);
+    } catch (e) {
+      return `(x) ${e}`;
     }
   }
 
@@ -189,7 +178,10 @@ class ToolExecutor {
   }
 }
 
-// ── CortexAgent ──
+// ════════════════════════════════════════════
+// Cortex Agent
+// ════════════════════════════════════════════
+
 export class CortexAgent {
   config: AgentConfig;
   private policy: PolicyEngine;
@@ -203,10 +195,18 @@ export class CortexAgent {
   private suspendedCaps = new Set<Capability>();
   private permissionDecisions = new Map<string, boolean>();
   private sessionId: string | null = null;
-  private term: { thinkToken: (t: string) => void; answerToken: (t: string) => void; 
-                  toolStart: (n: string, a: Record<string,unknown>) => void;
-                  toolDone: (ok: boolean, ms: number, p: string) => void;
-                  closeThinking: () => void; nextRound: () => void } | null = null;
+  private queryCount = 0;
+  private stepCountTotal = 0;
+  private memory: MemoryStore | null = null;
+  private sessions: SessionStore | null = null;
+  private term: {
+    thinkToken: (t: string) => void;
+    answerToken: (t: string) => void;
+    toolStart: (n: string, a: Record<string, unknown>) => void;
+    toolDone: (ok: boolean, ms: number, p: string) => void;
+    closeThinking: () => void;
+    nextRound: () => void;
+  } | null = null;
 
   setTerm(t: typeof this.term) { this.term = t; }
 
@@ -215,8 +215,7 @@ export class CortexAgent {
     let wd = path.resolve(this.config.workDir);
     try {
       fs.mkdirSync(wd, { recursive: true });
-    } catch (e) {
-      // 回退到用户目录
+    } catch {
       wd = path.resolve(os.homedir(), '.cortx', 'workspace');
       fs.mkdirSync(wd, { recursive: true });
       this.config.workDir = wd;
@@ -224,6 +223,13 @@ export class CortexAgent {
 
     this.policy = new PolicyEngine(wd, { permissionMode: this.config.permissionMode });
     this.executor = new ToolExecutor(wd, this.config.toolTimeout);
+
+    // ── 记忆 + 会话存储 ──
+    const memoryPath = this.config.memoryDir || path.join(wd, "memory.md");
+    const sessionsDir = this.config.sessionsDir || path.join(wd, "sessions");
+    this.memory = this.config.memoryEnabled ? new MemoryStore(memoryPath) : null;
+    this.sessions = this.config.sessionsEnabled ? new SessionStore(sessionsDir) : null;
+
     this.llm = new LLMProvider({
       apiKey: this.config.apiKey,
       baseUrl: this.config.baseUrl,
@@ -236,10 +242,15 @@ export class CortexAgent {
 
   private _makeGovernor(): void {
     const kb = ContextGovernor.loadKb(process.cwd());
+    const memoryCtx = this.memory?.toSystemContext() || "";
+    const historySummary = (this.sessions && this.sessionId)
+      ? (this.sessions.getHistorySummary(this.sessionId) || "") : "";
     this.governor = new ContextGovernor({
       system: this.config.systemPrompt,
       workDir: this.config.workDir,
       maxMsgs: this.config.maxContextMsgs,
+      memoryContext: memoryCtx,
+      historySummary: historySummary,
       kbContext: kb,
       contextLimit: this.config.contextLimit,
     });
@@ -257,6 +268,36 @@ export class CortexAgent {
     return this.llm.cacheStats;
   }
 
+  initSession(sessionId?: string, resume = false): string {
+    this._makeGovernor();
+    if (resume && this.sessions) {
+      const sid = sessionId || this.sessions.getLastSession() || "";
+      if (sid) {
+        try {
+          const [savedCtx] = this.sessions.load(sid);
+          const typedCtx = savedCtx.map(m => ({
+            role: (m.role || "user") as Message["role"],
+            content: String(m.content || ""),
+          }));
+          if (typedCtx.length > 0 && typedCtx[0].role !== "system") {
+            typedCtx.unshift(this.governor.system);
+          }
+          this.ctx = typedCtx;
+          this.sessionId = sid;
+          return sid;
+        } catch { /* fall through to create new */ }
+      }
+    }
+    const sid = sessionId || (this.sessions?.generateId() || "default");
+    this.sessionId = sid;
+    this.queryCount = 0;
+    this.stepCountTotal = 0;
+    this.ctx = [];
+    return sid;
+  }
+
+  get sessionIdStr(): string | null { return this.sessionId; }
+
   get lastTrace(): RunTrace | null { return this.trace; }
 
   async run(query: string, maxSteps?: number, keepHistory = false): Promise<string> {
@@ -266,7 +307,36 @@ export class CortexAgent {
       this.ctx = this.governor.appendUser(this.ctx, query);
     }
     const result = await this._loop(maxSteps || this.config.maxSteps);
+    this.queryCount++;
+    this.stepCountTotal += this.trace?.steps.length || 0;
+    this._autoSave();
     return result ?? "";
+  }
+
+  private _autoSave(): void {
+    if (!this.sessions || !this.sessionId) return;
+    try {
+      this.sessions.save(this.sessionId, this.ctx as any, {
+        session_id: this.sessionId,
+        last_active: new Date().toISOString(),
+        model: this.config.model,
+        query_count: this.queryCount,
+        step_count: this.stepCountTotal,
+      });
+    } catch { /* ignore */ }
+  }
+
+  saveSession(label?: string): string {
+    if (!this.sessions || !this.sessionId) return "";
+    this.sessions.save(this.sessionId, this.ctx as any, {
+      session_id: this.sessionId,
+      label: label || "",
+      last_active: new Date().toISOString(),
+      model: this.config.model,
+      query_count: this.queryCount,
+      step_count: this.stepCountTotal,
+    });
+    return this.sessionId;
   }
 
   reset(): void {
@@ -277,8 +347,9 @@ export class CortexAgent {
     this.trace = null;
   }
 
-  // ── 交互式权限确认（与 Python _request_confirmation 完全对应）──
-  private async _requestConfirmation(toolName: string, args: Record<string, unknown>, capability: string): Promise<boolean> {
+  private async _requestConfirmation(
+    toolName: string, args: Record<string, unknown>, capability: string,
+  ): Promise<boolean> {
     const safeArgs: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(args)) {
       if (k !== "workDir" && k !== "work_dir") safeArgs[k] = v;
@@ -297,28 +368,17 @@ export class CortexAgent {
 
     try {
       const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-      const ans = await new Promise<string>(resolve => {
-        rl.question('', resolve);
-      });
+      const ans = await new Promise<string>(resolve => rl.question('', resolve));
       rl.close();
       const trimmed = ans.trim().toLowerCase();
-      if (trimmed === "always") {
-        this.permissionDecisions.set(key, true);
-        return true;
-      }
-      if (trimmed === "deny") {
-        this.permissionDecisions.set(key, false);
-        return false;
-      }
+      if (trimmed === "always") { this.permissionDecisions.set(key, true); return true; }
+      if (trimmed === "deny") { this.permissionDecisions.set(key, false); return false; }
       return trimmed === "y" || trimmed === "yes";
-    } catch {
-      return false;
-    }
+    } catch { return false; }
   }
 
   private async _loop(maxSteps: number): Promise<string> {
     this.trace = this.observer.createTrace(this.ctx[this.ctx.length - 1]?.content || "");
-
     for (let stepNo = 1; stepNo <= maxSteps; stepNo++) {
       this.ctx = this.governor.govern(this.ctx);
       const { text, toolCalls, reasoning } = await this._think();
@@ -327,19 +387,14 @@ export class CortexAgent {
         return this.trace.error;
       }
       if (!toolCalls) {
-        const finalText = text || "";
-        this.ctx.push({ role: "assistant", content: finalText });
-        this.trace!.finalAnswer = finalText;
-        return finalText;
+        this.ctx.push({ role: "assistant", content: text || "" });
+        this.trace.finalAnswer = text || "";
+        return this.term ? "" : (text || "");
       }
-
-      // Tool calls
       this.ctx.push({
-        role: "assistant",
-        content: text || "",
+        role: "assistant", content: text || "",
         tool_calls: toolCalls.map(tc => ({
-          id: tc.id,
-          type: "function" as const,
+          id: tc.id, type: "function" as const,
           function: { name: tc.name, arguments: JSON.stringify(tc.args) },
         })),
       });
@@ -351,8 +406,6 @@ export class CortexAgent {
         const cap = meta?.capability || null;
 
         if (this.term) this.term.toolStart(tc.name, tc.args);
-
-        // Guard
         let ok: boolean;
         let reason: string;
         if (cap && this.suspendedCaps.has(cap)) {
@@ -360,16 +413,10 @@ export class CortexAgent {
         } else {
           [ok, reason] = this.policy.audit(tc.name, tc.args);
         }
-
-        // CONFIRM → 根据权限模式决定
-        // yolo/auto-edit: 自动放行
-        // standard 有终端交互: 弹出用户授权确认界面
-        // standard 无交互（--no-stream）: 自动拒绝
         if (!ok && reason === "confirm") {
           if (this.config.permissionMode === "yolo" || this.config.permissionMode === "auto-edit") {
             ok = true; reason = "";
           } else {
-            // standard 模式，尝试交互式确认
             try {
               ok = await this._requestConfirmation(tc.name, tc.args, capStr);
               reason = ok ? "用户授权" : "用户拒绝";
@@ -378,8 +425,6 @@ export class CortexAgent {
             }
           }
         }
-
-        // Adaptive guard
         if (!ok && cap && !reason.includes("用户")) {
           const cnt = (this.rejectionCounts.get(cap) || 0) + 1;
           this.rejectionCounts.set(cap, cnt);
@@ -390,13 +435,9 @@ export class CortexAgent {
             reason = `(x) [Policy 拦截] ${reason}`;
           }
         }
-
         let result: string;
-        if (!ok) {
-          result = reason;
-        } else {
-          result = await Promise.resolve(this.executor.execute(tc.name, tc.args));
-        }
+        if (!ok) { result = reason; }
+        else { result = await Promise.resolve(this.executor.execute(tc.name, tc.args)); }
 
         const latency = Date.now() - t0;
         if (this.term) this.term.toolDone(ok, latency, result);
@@ -407,28 +448,26 @@ export class CortexAgent {
       const convergence = this._reflect(this.trace, stepNo, maxSteps);
       if (convergence !== null) return convergence;
     }
-
     this.trace.stepLimitReached = true;
     return "[超步数] 未能完成";
   }
 
-  private _reflect(trace: RunTrace, stepNo: number, maxSteps: number): string | null {
-    // 结构性收敛：末步给予最终回答机会（不注入行为指令）
+  private _reflect(_trace: RunTrace, _stepNo: number, _maxSteps: number): string | null {
     return null;
   }
 
-  private async _think(): Promise<{ text: string | null; toolCalls: ParsedToolCall[] | null; reasoning: string }> {
+  private async _think(): Promise<{
+    text: string | null; toolCalls: ParsedToolCall[] | null; reasoning: string;
+  }> {
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         if (this.term) {
-          this.term.nextRound();
-          const resp = await this.llm.callStream(this.ctx, 
-            (t) => this.term!.thinkToken(t),
-            (t) => this.term!.answerToken(t));
-          return { text: resp.text || null, toolCalls: resp.toolCalls, reasoning: resp.reasoning };
+          return await this.llm.callStream(this.ctx,
+            t => this.term!.thinkToken(t),
+            t => this.term!.answerToken(t),
+          );
         }
-        const resp = await this.llm.call(this.ctx);
-        return { text: resp.text || null, toolCalls: resp.toolCalls, reasoning: resp.reasoning };
+        return await this.llm.call(this.ctx);
       } catch (e) {
         if (attempt < 2) await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
       }
@@ -436,6 +475,3 @@ export class CortexAgent {
     return { text: null, toolCalls: null, reasoning: "" };
   }
 }
-
-// 导出 LLMProvider 供 CLI 使用
-export { LLMProvider } from './llm.js';
