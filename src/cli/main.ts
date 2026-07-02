@@ -53,8 +53,25 @@ async function main(): Promise<void> {
   if (args.includes("--update")) {
     const pkg = require("../../package.json");
     console.log(`当前: cortx ${pkg.version} (TypeScript)`);
-    const { execSync } = require("child_process");
-    execSync("npm install -g @chnaicorp/cortx@latest --force", { stdio: "inherit" });
+    // 使用 npm-check-updates 或直接安装；Windows 上 npm config 的缓存可能导致 404
+    // 显式指定版本防止 @latest 缓存过期
+    const { execSync, exec } = require("child_process");
+    try {
+      // 方案1: 先获取最新版本，再安装
+      const latest = execSync("npm view @chnaicorp/cortx version", { encoding: "utf-8", timeout: 10000 }).trim();
+      if (latest && latest !== pkg.version) {
+        console.log(`可用版本: ${latest}，正在更新...`);
+        execSync(`npm install -g @chnaicorp/cortx@${latest} --force`, { stdio: "inherit" });
+      } else if (latest === pkg.version) {
+        console.log("已是最新版本。");
+      } else {
+        execSync("npm install -g @chnaicorp/cortx@latest --force", { stdio: "inherit" });
+      }
+    } catch (e) {
+      // 回退: npm update
+      console.error(`更新失败: ${e}`);
+      execSync("npm update -g @chnaicorp/cortx", { stdio: "inherit" });
+    }
     return;
   }
 

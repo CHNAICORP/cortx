@@ -1,6 +1,6 @@
 {
   "name": "@chnaicorp/cortx",
-  "version": "1.0.23",
+  "version": "1.0.24",
   "type": "commonjs",
   "description": "AI Agent runtime — Harness Agent architecture + Agentic Loop engine",
   "homepage": "https://github.com/CHNAICORP/cortx#readme",
