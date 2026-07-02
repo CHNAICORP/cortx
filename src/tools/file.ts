@@ -5,6 +5,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { registry } from '../core/registry.js';
 import { RiskLevel, Capability } from '../core/types.js';
+import { checkSsrf } from '../core/policy.js';
 
 registry.register(
   "列出目录内的文件和子目录",
@@ -70,7 +71,9 @@ registry.register("精确编辑文件", RiskLevel.WRITE, Capability.FS_WRITE,
     if (!fs.existsSync(d)) return `(x) 文件不存在: ${p}`;
     let content = fs.readFileSync(d, "utf-8");
     if (!content.includes(oldS)) return "(x) 未找到匹配文本";
-    content = content.replace(oldS, newS);
+    // Replace only the FIRST occurrence (matches Python behavior)
+    const idx = content.indexOf(oldS);
+    content = content.slice(0, idx) + newS + content.slice(idx + oldS.length);
     fs.writeFileSync(d, content, "utf-8");
     return `已替换 1 处`;
   },
@@ -82,7 +85,37 @@ registry.register("通配符匹配文件", RiskLevel.SAFE, Capability.FS_READ,
     const pattern = String(args["pattern"]);
     const base = path.resolve(workDir);
     const fullPattern = path.join(base, pattern);
-    const matches = require("glob").sync(fullPattern, { nodir: true }).slice(0, 50);
+    let matches: string[];
+    try {
+      // Node 22+ has native glob
+      matches = fs.globSync(fullPattern).slice(0, 50);
+    } catch {
+      // Fallback: use manual recursive glob with minimatch-style patterns
+      matches = [];
+      const dir = path.dirname(fullPattern);
+      if (fs.existsSync(dir)) {
+        const searchPattern = path.basename(fullPattern);
+        const regex = new RegExp(
+          "^" + searchPattern.replace(/\./g, "\\.").replace(/\*/g, ".*").replace(/\?/g, ".") + "$"
+        );
+        const walk = (d: string) => {
+          if (matches.length >= 50) return;
+          try {
+            for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+              if (matches.length >= 50) return;
+              const full = path.join(d, entry.name);
+              if (entry.isDirectory()) {
+                // Recursive for **/
+                if (pattern.includes("**")) walk(full);
+              } else if (regex.test(entry.name)) {
+                matches.push(full);
+              }
+            }
+          } catch { /* skip unreadable dirs */ }
+        };
+        walk(dir);
+      }
+    }
     if (!matches.length) return `(无匹配: ${pattern})`;
     return `(${matches.length} 个匹配)\n` + matches.map((m: string) => `  ${path.relative(base, m)}`).join("\n");
   },
@@ -152,6 +185,11 @@ registry.register("HTTP请求", RiskLevel.SAFE, Capability.NET_HTTP,
   async function http_request(_wd: string, args: Record<string, unknown>): Promise<string> {
     const url = String(args["url"]); const method = String(args["method"] || "GET");
     try {
+      // SSRF check before making the request
+      if (/^https?:\/\//i.test(url)) {
+        const [ok, reason] = await checkSsrf(url);
+        if (!ok) return `(x) ${reason}`;
+      }
       const resp = await fetch(url, { method, body: args["body"] ? String(args["body"]) : undefined });
       return `HTTP ${resp.status}\n${(await resp.text()).slice(0, 2000)}`;
     } catch (e) { return `(x) ${e}`; }

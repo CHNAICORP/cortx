@@ -8,7 +8,7 @@ function findUpwards(filename: string, startDir: string): string | null {
   let d = path.resolve(startDir);
   while (true) {
     const candidate = path.join(d, filename);
-    if (fs.existsSync(candidate)) return candidate;
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return candidate;
     const parent = path.dirname(d);
     if (parent === d) return null;
     d = parent;
@@ -27,6 +27,23 @@ export interface Settings {
   [key: string]: unknown;
 }
 
+function smartMerge(base: Record<string, unknown>, override: Record<string, unknown>): Record<string, unknown> {
+  const result = { ...base };
+  for (const [key, val] of Object.entries(override)) {
+    if (val === null || val === "" || val === 0 || val === undefined) {
+      // Empty values do not override (matching Python _smart_merge)
+      continue;
+    }
+    if (Array.isArray(val) && val.length === 0) continue;
+    if (typeof val === "object" && !Array.isArray(val) && typeof result[key] === "object" && !Array.isArray(result[key]) && result[key] !== null) {
+      result[key] = smartMerge(result[key] as Record<string, unknown>, val as Record<string, unknown>);
+    } else {
+      result[key] = val;
+    }
+  }
+  return result;
+}
+
 export function loadSettings(): Settings {
   const merged: Record<string, unknown> = {};
   // 1. Project-level
@@ -34,10 +51,16 @@ export function loadSettings(): Settings {
   if (proj) {
     try { Object.assign(merged, JSON.parse(fs.readFileSync(proj, "utf-8"))); } catch { /* ignore */ }
   }
-  // 2. User-level
+  // 2. User-level (smart merge — deep merge, empty values don't override)
   const user = path.join(process.env.HOME || process.env.USERPROFILE || "~", ".cortx", "settings.json");
   if (fs.existsSync(user)) {
-    try { Object.assign(merged, JSON.parse(fs.readFileSync(user, "utf-8"))); } catch { /* ignore */ }
+    try {
+      const userSettings = JSON.parse(fs.readFileSync(user, "utf-8"));
+      const result = smartMerge(merged, userSettings);
+      // Apply the merge result back
+      for (const key of Object.keys(merged)) delete merged[key];
+      Object.assign(merged, result);
+    } catch { /* ignore */ }
   }
   // 3. 首次运行自动创建全局配置
   if (Object.keys(merged).length === 0 && !process.env.CORTEX_API_KEY) {

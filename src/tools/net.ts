@@ -20,7 +20,7 @@ import * as dns from "node:dns";
 // ── SSRF 防护 (内网 CIDR 黑名单) ──
 const SSRF_BLOCKED_NETS = [
   /^10\./, /^172\.(1[6-9]|2\d|3[01])\./, /^192\.168\./,
-  /^127\./, /^169\.254\./, /^0\./,
+  /^127\./, /^169\.254\./, /^0\.0\.0\./,
 ];
 
 function isPrivateHost(hostname: string): boolean {
@@ -35,7 +35,7 @@ function isPrivateHost(hostname: string): boolean {
   return false;
 }
 
-function httpRequest(url: string, method = 'GET', body?: string, timeout = 10000): Promise<string> {
+function httpRequest(url: string, method = 'GET', body?: string, timeout = 10000, extraHeaders: Record<string, string> = {}): Promise<string> {
   return new Promise((resolve, reject) => {
     const reqUrl = new URL(url);
 
@@ -64,6 +64,7 @@ function httpRequest(url: string, method = 'GET', body?: string, timeout = 10000
         'User-Agent': 'Mozilla/5.0 (compatible; CortexAgent/1.0)',
         'Host': reqUrl.hostname,  // 重要：保留原始 Host
         'Accept': 'text/html,application/json,*/*',
+        ...extraHeaders, // Merge extra headers (e.g., API keys)
       } as Record<string, string>,
     };
     if (body) {
@@ -75,13 +76,17 @@ function httpRequest(url: string, method = 'GET', body?: string, timeout = 10000
       };
     }
     const req = mod.request(options, (res) => {
-      // 跟随重定向 (同 host)
+      // 跟随重定向 (同 host) — check SSRF on redirect too
       if ([301, 302, 307, 308].includes(res.statusCode || 0) && res.headers.location) {
         const loc = res.headers.location;
         try {
           const locUrl = new URL(loc, url);
+          if (isPrivateHost(locUrl.hostname)) {
+            reject(new Error(`SSRF 防护: 重定向到内网地址 ${locUrl.hostname}`));
+            return;
+          }
           if (locUrl.hostname === reqUrl.hostname) {
-            resolve(httpRequest(locUrl.href, method, body, timeout));
+            resolve(httpRequest(locUrl.href, method, body, timeout, extraHeaders));
             return;
           }
         } catch { /* 继续 */ }
@@ -255,14 +260,11 @@ registry.register(
 
 // ── API helpers (with proper headers) ──
 async function apiGet(url: string, extraHeaders: Record<string, string>, timeout: number): Promise<string> {
-  return httpRequest(url, 'GET', undefined, timeout); // headers merged in httpRequest
+  return httpRequest(url, 'GET', undefined, timeout, extraHeaders);
 }
 
 async function apiPost(url: string, body: string, timeout: number): Promise<string> {
-  // Use httpRequest via POST — but it expects urlencoded body, so use fetch for JSON
-  const reqUrl = new URL(url);
-  const proxy = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy;
-  // For simplicity, use httpRequest with method POST — Tavily accepts x-www-form-urlencoded too
+  // Use httpRequest via POST — Tavily accepts x-www-form-urlencoded too
   return httpRequest(url, 'POST', body, timeout);
 }
 

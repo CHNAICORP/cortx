@@ -29,12 +29,18 @@ registry.register("执行 Python 代码", RiskLevel.SYSTEM, Capability.PYTHON,
   function run_python(_workDir: string, args: Record<string, unknown>): string {
     const code = String(args["code"]);
     try {
-      const tmp = path.join(require("os").tmpdir(), `ctx_py_${Date.now()}.py`);
+      // Use random suffix to prevent collision when two calls happen in same ms
+      const rnd = Math.random().toString(36).slice(2, 8);
+      const tmp = path.join(require("os").tmpdir(), `ctx_py_${Date.now()}_${rnd}.py`);
       fs.writeFileSync(tmp, code, "utf-8");
-      const result = spawnSync("python", [tmp], { timeout: 10000, encoding: "utf-8" });
-      fs.unlinkSync(tmp);
-      const out = ((result.stdout || "") + (result.stderr || "")).trim().slice(0, 3000) || "(无输出)";
-      return `exit=${result.status}\n${out}`;
+      try {
+        const result = spawnSync("python", [tmp], { timeout: 10000, encoding: "utf-8" });
+        const out = ((result.stdout || "") + (result.stderr || "")).trim().slice(0, 3000) || "(无输出)";
+        return `exit=${result.status}\n${out}`;
+      } finally {
+        // Always clean up temp file even if spawn fails
+        try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+      }
     } catch (e) { return `(x) Python 沙箱异常: ${e}`; }
   },
 );

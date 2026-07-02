@@ -56,6 +56,22 @@ registry.register("桌面截图", RiskLevel.SYSTEM, Capability.SHELL,
   function computer_screenshot(workDir: string, args: Record<string, unknown>): string {
     const p = String(args["outPath"] || "desktop_screenshot.png");
     const d = path.resolve(path.isAbsolute(p) ? p : path.join(workDir, p));
+    // Validate path is within workspace before use
+    const sep = path.sep;
+    if (!(d.startsWith(workDir + sep) || d === workDir)) {
+      return `(x) 路径越权: ${p}`;
+    }
+    // Validate path has acceptable extension
+    const ext = path.extname(d).toLowerCase();
+    if (![".png", ".jpg", ".jpeg", ".bmp"].includes(ext)) {
+      return `(x) 不支持的文件类型: ${ext}`;
+    }
+    // Validate no suspicious characters in path (shell metacharacters for injection)
+    // Note: backslash is allowed — it's the Windows path separator
+    // The path is already validated as within workspace above
+    if (/[$`;|&<>{}()!"]/.test(d)) {
+      return "(x) 路径含非法字符";
+    }
     try {
       // Windows PowerShell screenshot
       if (process.platform === "win32") {
@@ -74,10 +90,14 @@ registry.register("模拟鼠标点击", RiskLevel.SYSTEM, Capability.SHELL,
   function computer_click(_wd: string, args: Record<string, unknown>): string {
     const x = Number(args["x"] || 0);
     const y = Number(args["y"] || 0);
+    // Validate coordinates are finite numbers within reasonable screen bounds
+    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x > 32767 || y > 32767) {
+      return `(x) 无效坐标: (${args["x"]}, ${args["y"]})`;
+    }
     if (process.platform === "win32") {
       try {
         require("child_process").execSync(
-          `powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(${x},${y})"`,
+          `powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(${Math.round(x)},${Math.round(y)})"`,
           { timeout: 10000 }
         );
         return `已点击 (${x}, ${y})`;

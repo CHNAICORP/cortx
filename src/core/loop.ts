@@ -95,6 +95,11 @@ class ContextGovernor {
   govern(msgs: Message[]): Message[] {
     if (msgs.length <= this.maxMsgs) return msgs;
     const limit = this.maxMsgs - 1;
+    // Guard against corrupt contexts with very low maxMsgs
+    if (limit <= 0) {
+      // Keep system + last message
+      return [msgs[0], msgs[msgs.length - 1]];
+    }
     let reserve: Set<number> = new Set();
     let hasPair = false;
     for (let i = msgs.length - 1; i > 1; i--) {
@@ -118,6 +123,9 @@ class ContextGovernor {
     if (trimmed > 0) {
       kept.unshift({ role: "system", content: `[${trimmed}条历史已压缩]` });
       while (kept.length > this.maxMsgs - 1) kept.splice(1, 1);
+    }
+    if (kept.length === 0) {
+      kept.push(msgs[msgs.length - 1]);
     }
     return [msgs[0], ...kept];
   }
@@ -274,16 +282,22 @@ export class CortexAgent {
       const sid = sessionId || this.sessions.getLastSession() || "";
       if (sid) {
         try {
-          const [savedCtx] = this.sessions.load(sid);
-          const typedCtx = savedCtx.map(m => ({
+          const [savedCtx, meta] = this.sessions.load(sid);
+          // Preserve full message structure including tool_calls and tool_call_id
+          const typedCtx: Message[] = savedCtx.map((m: any) => ({
             role: (m.role || "user") as Message["role"],
             content: String(m.content || ""),
+            ...(Array.isArray(m.tool_calls) ? { tool_calls: m.tool_calls } : {}),
+            ...(typeof m.tool_call_id === "string" ? { tool_call_id: m.tool_call_id } : {}),
           }));
           if (typedCtx.length > 0 && typedCtx[0].role !== "system") {
             typedCtx.unshift(this.governor.system);
           }
           this.ctx = typedCtx;
           this.sessionId = sid;
+          // Restore query/step counters from saved metadata
+          this.queryCount = (meta && meta.query_count as number) || 0;
+          this.stepCountTotal = (meta && meta.step_count as number) || 0;
           return sid;
         } catch { /* fall through to create new */ }
       }
@@ -323,7 +337,10 @@ export class CortexAgent {
         query_count: this.queryCount,
         step_count: this.stepCountTotal,
       });
-    } catch { /* ignore */ }
+    } catch (e) {
+      // Log save failure but don't crash
+      console.error(`[session] 保存失败: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   saveSession(label?: string): string {
@@ -411,7 +428,7 @@ export class CortexAgent {
         if (cap && this.suspendedCaps.has(cap)) {
           ok = false; reason = `能力 ${cap} 已被暂停`;
         } else {
-          [ok, reason] = this.policy.audit(tc.name, tc.args);
+          [ok, reason] = await this.policy.audit(tc.name, tc.args);
         }
         if (!ok && reason === "confirm") {
           if (this.config.permissionMode === "yolo" || this.config.permissionMode === "auto-edit") {
@@ -445,14 +462,26 @@ export class CortexAgent {
         this.ctx.push({ role: "tool", tool_call_id: tc.id, content: result });
       }
 
-      const convergence = this._reflect(this.trace, stepNo, maxSteps);
+      const convergence = await this._reflect(this.trace, stepNo, maxSteps);
       if (convergence !== null) return convergence;
     }
     this.trace.stepLimitReached = true;
     return "[超步数] 未能完成";
   }
 
-  private _reflect(_trace: RunTrace, _stepNo: number, _maxSteps: number): string | null {
+  private async _reflect(trace: RunTrace, stepNo: number, maxSteps: number): Promise<string | null> {
+    if (stepNo === maxSteps) {
+      // On the last step, give LLM one more chance to produce a final answer
+      const { text, toolCalls } = await this._think();
+      if (text) {
+        trace.finalAnswer = text;
+        if (toolCalls && toolCalls.length > 0) {
+          return text + "\n\n[已达最大步数，工具调用未执行]";
+        }
+        return text;
+      }
+      return "[达到最大步数]";
+    }
     return null;
   }
 

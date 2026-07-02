@@ -383,13 +383,15 @@ def mcp_install(work_dir: str, server: str = "") -> str:
 def _add_mcp_to_settings(key: str, info: dict):
     """将 MCP server 添加到 settings.json 的 mcpServers 段。"""
     from . import config as cfg
-    settings_path = os.path.join(os.path.dirname(os.path.abspath(work_dir := '.')), '.cortx', 'settings.json')
-    # 尝试找到实际 settings.json
+    # 尝试找到实际 settings.json — 优先当前工作目录
+    settings_path = None
     for candidate in [os.path.join(os.getcwd(), '.cortx', 'settings.json'),
                       os.path.expanduser('~/.cortex/settings.json')]:
         if os.path.isfile(candidate):
             settings_path = candidate
             break
+    if not settings_path:
+        settings_path = os.path.join(os.getcwd(), '.cortx', 'settings.json')
     try:
         with open(settings_path, 'r', encoding='utf-8') as f:
             settings = json.load(f)

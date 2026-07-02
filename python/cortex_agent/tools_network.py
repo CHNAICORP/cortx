@@ -32,8 +32,6 @@ _NPM_MIRRORS = {
 # HTTP 代理工具
 # ══════════════════════════════════════════════════════════════
 
-_PROXY_STORE = {}  # 模块级代理状态存储
-
 
 @registry.register(
     "设置 HTTP/HTTPS/SOCKS 代理。用于加速网络访问、解决超时问题。\n"
@@ -120,23 +118,6 @@ def show_proxy(work_dir: str) -> str:
 # ══════════════════════════════════════════════════════════════
 # 镜像源切换工具
 # ══════════════════════════════════════════════════════════════
-
-_PIP_MIRRORS = {
-    "tsinghua": "https://pypi.tuna.tsinghua.edu.cn/simple",
-    "aliyun":   "https://mirrors.aliyun.com/pypi/simple",
-    "tencent":  "https://mirrors.cloud.tencent.com/pypi/simple",
-    "ustc":     "https://pypi.mirrors.ustc.edu.cn/simple",
-    "douban":   "https://pypi.douban.com/simple",
-    "huawei":   "https://repo.huaweicloud.com/repository/pypi/simple",
-    "default":  "https://pypi.org/simple",
-}
-
-_NPM_MIRRORS = {
-    "taobao":   "https://registry.npmmirror.com",
-    "tencent":  "https://mirrors.cloud.tencent.com/npm/",
-    "huawei":   "https://repo.huaweicloud.com/repository/npm/",
-    "default":  "https://registry.npmjs.org",
-}
 
 
 @registry.register(

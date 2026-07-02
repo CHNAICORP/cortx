@@ -5,6 +5,7 @@
 import * as os from "os";
 import * as path from "path";
 import * as net from "net";
+import * as dns from "dns";
 import { RiskLevel, Capability, AuditVerdict, PermissionMode } from './types.js';
 import { registry } from './registry.js';
 
@@ -16,40 +17,86 @@ const SSRF_BLOCKED_NETS = [
 ];
 
 function ipInCidr(ip: string, cidr: string): boolean {
-  // Simplified IPv4 CIDR check (covers common cases)
+  // Full CIDR check covering both IPv4 and IPv6
+  if (ip.includes(":") && cidr.includes(":")) {
+    // IPv6 CIDR — simple prefix match for the listed ranges
+    const [ipNorm] = ip.toLowerCase().split("%"); // strip zone index
+    const [netStr, bitsStr] = cidr.split("/");
+    const bits = parseInt(bitsStr);
+    // For /128: exact match; for /7 and /10: prefix match
+    if (bits >= 64) return ipNorm === netStr.toLowerCase();
+    return ipNorm.toLowerCase().startsWith(netStr.toLowerCase().slice(0, Math.ceil(bits / 4)));
+  }
   if (!ip.includes(".") || !cidr.includes(".")) return false;
   const [ipA, ipB, ipC, ipD] = ip.split(".").map(Number);
   const [netStr, bitsStr] = cidr.split("/");
   const bits = parseInt(bitsStr);
   const [nA, nB, nC, nD] = netStr.split(".").map(Number);
-  const ipNum = (ipA << 24) | (ipB << 16) | (ipC << 8) | ipD;
-  const netNum = (nA << 24) | (nB << 16) | (nC << 8) | nD;
-  const mask = ~((1 << (32 - bits)) - 1);
+  // Guard against NaN (e.g., "localhost" passed as IP)
+  if (isNaN(ipA) || isNaN(nA) || bits > 32) return false;
+  const ipNum = ((ipA << 24) | (ipB << 16) | (ipC << 8) | ipD) >>> 0;
+  const netNum = ((nA << 24) | (nB << 16) | (nC << 8) | nD) >>> 0;
+  const mask = ~((1 << (32 - bits)) - 1) >>> 0;
   return (ipNum & mask) === (netNum & mask);
 }
 
-export function checkSsrf(hostOrUrl: string): [boolean, string] {
+async function resolveHostname(host: string): Promise<string[]> {
+  try {
+    const addresses = await dns.promises.resolve4(host);
+    try {
+      const v6 = await dns.promises.resolve6(host);
+      return [...addresses, ...v6];
+    } catch { /* IPv6 not available */ }
+    return addresses;
+  } catch {
+    // Try reverse lookup — if DNS fails, block (rebinding protection)
+    return [];
+  }
+}
+
+export async function checkSsrf(hostOrUrl: string): Promise<[boolean, string]> {
   let host = hostOrUrl;
   const m = hostOrUrl.match(/^https?:\/\/(?:\[([^\]]+)\]|([^/:]+))/i);
   if (m) host = (m[1] || m[2]).toLowerCase();
 
   // Check if it's already an IP
   if (net.isIP(host)) {
+    // Handle IPv4-mapped IPv6
+    const v4m = host.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+    if (v4m) host = v4m[1];
     for (const cidr of SSRF_BLOCKED_NETS) {
-      if (ipInCidr(host, cidr) || host === "127.0.0.1" || host === "::1") {
+      if (ipInCidr(host, cidr)) {
         return [false, `SSRF 防护: ${host} 在禁访范围 ${cidr}`];
       }
     }
     return [true, ""];
   }
-  // Hostname — resolve and check
-  try {
-    // Synchronous DNS not available in pure Node without dns.promises
-    // For simplicity, allow hostnames (tools will do their own check)
-    return [true, ""];
-  } catch {
-    return [false, `SSRF 防护: 无法解析 ${host}`];
+
+  // Check for localhost variants
+  if (host === "localhost" || host.endsWith(".local") || host.endsWith(".internal")) {
+    return [false, `SSRF 防护: 禁止访问 ${host}`];
   }
+
+  // Hostname — resolve and check all resolved IPs
+  try {
+    const ips = await resolveHostname(host);
+    if (ips.length > 0) {
+      // DNS succeeded — check if any resolved IP is in blocked range
+      for (const ip of ips) {
+        for (const cidr of SSRF_BLOCKED_NETS) {
+          if (ipInCidr(ip, cidr)) {
+            return [false, `SSRF 防护: ${host} → ${ip} 在禁访范围 ${cidr}`];
+          }
+        }
+      }
+      return [true, ""];
+    }
+  } catch {
+    // DNS error — fall through to warn+allow
+  }
+  // DNS failed: warn but allow (the HTTP layer will do its own isPrivateHost check)
+  // This avoids blocking legitimate external requests when corporate DNS is restricted
+  return [true, `[WARN] SSRF: DNS 无法解析 ${host}，放行 (连接层检查)`];
 }
 
 // ── PolicyEngine ──
@@ -63,34 +110,79 @@ export class PolicyEngine {
   static WARN_PREFIX = "[WARN] ";
 
   static SHELL_BLOCK_SUBSTR = [
-    "rm -rf /", "sudo rm", "del /f /s", "format ", "diskpart", "mkfs", "fdisk", "dd if=",
-    "shutdown", "reboot", "sudo ", "su ", "runas ",
-    "nc ", "ncat ", "netcat ", "telnet ", "ssh ", "scp ", "sftp ", "ftp ", "sendmail",
+    // System destruction
+    "rm -rf /", "rm -rf --no-preserve-root", "sudo rm", "del /f /s",
+    "format ", "diskpart", "mkfs", "fdisk", "dd if=",
+    "shutdown", "reboot", "stop-computer", "restart-computer",
+    // Privilege escalation
+    "sudo ", "su ", "runas ",
+    // Data exfiltration vectors
+    "nc ", "ncat ", "netcat ", "telnet ",
+    "ssh ", "scp ", "sftp ", "ftp ", "sendmail",
+    // System config modification
+    "reg add", "reg delete", "reg import", "reg save",
+    "sc create", "sc delete", "sc config", "sc stop", "sc start",
+    "schtasks", "new-service", "remove-service",
+    "set-itemproperty", "new-itemproperty",
+    "bcdedit", "netsh ", "wmic ", "set-executionpolicy",
+    // Process/service termination
+    "taskkill", "stop-process", "clear-recyclebin",
+    // PowerShell obfuscation
+    "-encodedcommand", "-enc ", " -e ", "invoke-expression",
+    "iex ", ".iex", "|iex", ";iex",
+    // Registry access
+    "hklm:", "hkcu:", "hkey_",
+  ];
+
+  // Tier 1 regex patterns — context-sensitive shell detection
+  static SHELL_BLOCK_RE: [RegExp, string][] = [
+    [/(?:^|\s)([d-z]:\\)/i,           "禁止访问非 C 盘路径"],
+    [/(?:^|\s|;)(?:-[eE][nNcCoOdDeEdDcCoOmMmMaAnNdD]*)\s/, "禁止 PowerShell 编码命令 (-e/-en/-enc)"],
+    [/[|;]\s*remove-item\b/i,          "禁止管道删除操作"],
+    [/[|;]\s*stop-process\b/i,          "禁止管道终止进程"],
+    [/[|;]\s*out-file\b/i,              "禁止管道写入文件"],
+    [/[|;]\s*set-content\b/i,           "禁止管道修改文件"],
+    [/>\s*[/\\]/i,                      "禁止重定向到系统路径"],
   ];
 
   static SHELL_WARN_SUBSTR = [
-    "curl ", "wget ", "chmod 777", "chmod -R",
+    "curl ", "wget ", "invoke-webrequest", "invoke-restmethod",
+    "chmod 777", "chmod -R",
     "net user", "net localgroup", "net share",
+    "get-process", "get-service", "get-eventlog", "get-wmiobject",
+    "test-connection", "test-netconnection", "resolve-dnsname",
+    "set-content", "out-file", "add-content",
   ];
 
   static SQL_DENY = new Set([
     "drop", "delete", "update", "insert", "alter", "create", "truncate",
     "grant", "revoke", "exec", "execute", "union", "attach", "detach", "pragma",
+    "replace", "into",
   ]);
 
   static PYTHON_DENY: [RegExp, string][] = [
     [/\b__\s*import\s*__/, "禁止 __import__ 逃逸"],
     [/\bexec\s*\(/, "禁止 exec"],
     [/\beval\s*\(/, "禁止 eval"],
+    [/\bcompile\s*\(/, "禁止 compile"],
     [/\bsubprocess\b/, "禁止 subprocess"],
     [/\bsocket\b/, "禁止 socket"],
     [/\bctypes\b/, "禁止 ctypes"],
     [/\b__builtins__/, "禁止 __builtins__"],
+    [/\b__class__/, "禁止 __class__"],
+    [/\b__base__/, "禁止 __base__"],
     [/\b__subclasses__/, "禁止 __subclasses__"],
+    [/\b__globals__/, "禁止 __globals__"],
+    [/\b__getattribute__/, "禁止 __getattribute__"],
+    [/\b__delattr__/, "禁止 __delattr__"],
+    [/\b__setattr__/, "禁止 __setattr__"],
   ];
 
-  // 所有路径参数名
-  static PATH_PARAMS = new Set(["path", "file_a", "file_b", "source", "target", "pattern"]);
+  // All path-like parameter names used across file tools (both Python and TS naming)
+  static PATH_PARAMS = new Set([
+    "path", "filePath", "dirPath", "fileA", "fileB",
+    "file_a", "file_b", "source", "target", "pattern", "outPath",
+  ]);
 
   private workDir: string;
   private config: { permissionMode: PermissionMode };
@@ -132,7 +224,7 @@ export class PolicyEngine {
     return AuditVerdict.ALLOW;
   }
 
-  audit(toolName: string, args: Record<string, unknown>): [boolean, string] {
+  async audit(toolName: string, args: Record<string, unknown>): Promise<[boolean, string]> {
     const meta = registry.meta(toolName);
     if (!meta) return [false, `未注册: ${toolName}`];
     const risk = meta.risk;
@@ -143,7 +235,7 @@ export class PolicyEngine {
     if (cap === Capability.FS_READ || cap === Capability.FS_WRITE) {
       for (const pname of PolicyEngine.PATH_PARAMS) {
         const val = args[pname];
-        if (typeof val === "string") {
+        if (typeof val === "string" && val) {
           isOutside = this.isOutsideWorkspace(val);
           if (isOutside) break;
         }
@@ -163,7 +255,7 @@ export class PolicyEngine {
       [contentOk, contentReason] = this.auditPython(String(args["code"] || ""));
     } else if (cap === Capability.NET_HTTP || cap === Capability.NET_SEARCH) {
       const target = String(args["url"] || args["query"] || "");
-      [contentOk, contentReason] = this.auditUrl(target);
+      [contentOk, contentReason] = await this.auditUrl(target);
     } else if (cap === Capability.FS_WRITE) {
       [contentOk, contentReason] = this.auditPathWrite(args);
     }
@@ -177,8 +269,13 @@ export class PolicyEngine {
   }
 
   private auditPathWrite(args: Record<string, unknown>): [boolean, string] {
-    const userPath = String(args["path"] || args["source"] || "");
+    const userPath = String(args["path"] || args["filePath"] || args["source"] || "");
     const full = path.resolve(this.workDir, userPath);
+    // Check workspace containment
+    const sep = path.sep;
+    if (!(full.startsWith(this.workDir + sep) || full === this.workDir)) {
+      return [false, `路径越权: ${userPath}`];
+    }
     const ext = path.extname(full).toLowerCase();
     if (PolicyEngine.FORBIDDEN_EXTS.has(ext)) return [false, `禁止写入 ${ext}`];
     return [true, full];
@@ -197,11 +294,17 @@ export class PolicyEngine {
 
   private auditShell(cmd: string): [boolean, string] {
     const low = cmd.toLowerCase();
+    // Tier 1a: substring BLOCK
     for (const p of PolicyEngine.SHELL_BLOCK_SUBSTR) {
-      if (low.includes(p)) return [false, `高危命令: ${p}`];
+      if (low.includes(p.toLowerCase())) return [false, `高危命令: ${p}`];
     }
+    // Tier 1b: regex BLOCK
+    for (const [pattern, reason] of PolicyEngine.SHELL_BLOCK_RE) {
+      if (pattern.test(cmd)) return [false, reason];
+    }
+    // Tier 2: WARN
     for (const p of PolicyEngine.SHELL_WARN_SUBSTR) {
-      if (low.includes(p)) return [true, `${PolicyEngine.WARN_PREFIX}潜在风险: ${p}`];
+      if (low.includes(p.toLowerCase())) return [true, `${PolicyEngine.WARN_PREFIX}潜在风险: ${p}`];
     }
     return [true, ""];
   }
@@ -213,7 +316,7 @@ export class PolicyEngine {
     return [true, ""];
   }
 
-  private auditUrl(target: string): [boolean, string] {
+  private async auditUrl(target: string): Promise<[boolean, string]> {
     if (!/^https?:\/\//i.test(target)) return [true, ""];
     return checkSsrf(target);
   }
