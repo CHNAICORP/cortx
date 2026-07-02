@@ -243,7 +243,7 @@ def main():
             print(f"  {term.CYAN}/skill <name>{term.RESET}   调用技能（如 /skill code-review）")
             print(f"  {term.CYAN}═══ 工具 & 模型 ═══{term.RESET}")
             print(f"  {term.CYAN}/m, /model [pro]{term.RESET}  切换模型")
-            print(f"  {term.CYAN}/mode [s|a|y]{term.RESET}   切换权限模式 (Shift+Tab)")
+            print(f"  {term.CYAN}/mode [s|a|y]{term.RESET}   切换权限模式")
             print(f"  {term.CYAN}/t, /tools{term.RESET}       列出工具")
             print(f"  {term.CYAN}═══ 审计 & 调试 ═══{term.RESET}")
             print(f"  {term.CYAN}/trace{term.RESET}          最后轨迹")
@@ -268,11 +268,10 @@ def main():
             print(f"当前: {agent.model}\n可用: flash | pro"); continue
         if q.startswith("/model ") or q.startswith("/m "):
             agent.switch_model(q.split(" ",1)[1]); print(f"→ {agent.model}"); continue
-        # ── Permission mode switching (参考 Claude Code Shift+Tab / Codex /permissions) ──
+        # ── Permission mode switching ──
         if q in ("/mode", "/permissions"):
             m = agent.config.permission_mode
             print(f"当前: {m}\n可用: {term.GREEN}s/standard{term.RESET} | {term.YELLOW}a/auto-edit{term.RESET} | {term.RED}y/yolo{term.RESET}")
-            print(f"快捷键: Shift+Tab 循环切换")
             continue
         if q.startswith("/mode ") or q.startswith("/permissions "):
             result = agent.switch_permission_mode(q.split(" ", 1)[1])

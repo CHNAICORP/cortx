@@ -130,7 +130,7 @@ async function main(): Promise<void> {
 
   if (query) {
     const answer = await agent.run(query);
-    if (noStream) console.log(answer);
+    console.log(answer);
     const trace = agent.lastTrace;
     if (trace?.steps.length) {
       const totalMs = trace.steps.reduce((s, st) => s + st.latencyMs, 0);
@@ -158,7 +158,7 @@ async function main(): Promise<void> {
 
     try {
       const answer = await agent.run(q);
-      if (noStream) console.log(answer);
+      console.log(answer);
     } catch (e) {
       console.error(`[ERROR] ${e}`);
     }
