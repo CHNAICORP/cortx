@@ -482,6 +482,13 @@ export class CortexAgent {
         }
         return text;
       }
+      // LLM returned empty — summarize what we did collect from tool results
+      if (trace.steps.length > 0) {
+        const lastResults = trace.steps.slice(-3).map(s =>
+          `[${s.toolName}] ${s.resultPreview}`
+        ).join("\n");
+        return `[达到最大步数 ${maxSteps} 步，无法生成完整回答]\n\n最后一次工具调用结果:\n${lastResults}\n\n请尝试用更具体的问题重新查询，或增加 --max-steps 参数。`;
+      }
       return "[达到最大步数]";
     }
     return null;

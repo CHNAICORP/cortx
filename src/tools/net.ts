@@ -279,7 +279,8 @@ registry.register(
     try {
       const html = await httpRequest(url, 'GET', undefined, 10000);
       let text = htmlToText(html);
-      if (text.length > 8000) text = text.slice(0, 8000) + `\n\n[...已截断，原文 ${text.length} 字符]`;
+      // Trim to 3KB to prevent context explosion from multiple fetches
+      if (text.length > 3000) text = text.slice(0, 3000) + `\n\n[...已截断，原文 ${text.length} 字符]`;
       return `--- ${url} ---\n${text || "(无有效文本)"}`;
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
