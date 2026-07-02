@@ -3,8 +3,8 @@
  */
 import * as fs from "fs";
 import * as path from "path";
-import { registry } from "../core/registry";
-import { RiskLevel, Capability } from "../core/types";
+import { registry } from '../core/registry.js';
+import { RiskLevel, Capability } from '../core/types.js';
 
 function getMemoryPath(workDir: string): string {
   return path.join(workDir, "memory.md");

@@ -1,7 +1,8 @@
 {
   "name": "cortex-agent",
   "version": "1.0.0",
-  "description": "AI Agent runtime — Harness Agent architecture + Agentic Loop engine (Python)",
+  "type": "commonjs",
+  "description": "AI Agent runtime — Harness Agent architecture + Agentic Loop engine",
   "homepage": "https://github.com/<user>/cortex-agent#readme",
   "license": "MIT",
   "keywords": [

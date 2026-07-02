@@ -5,8 +5,8 @@
 import * as os from "os";
 import * as path from "path";
 import * as net from "net";
-import { RiskLevel, Capability, AuditVerdict, PermissionMode } from "./types";
-import { registry } from "./registry";
+import { RiskLevel, Capability, AuditVerdict, PermissionMode } from './types.js';
+import { registry } from './registry.js';
 
 // ── SSRF 拦截网段 ──
 const SSRF_BLOCKED_NETS = [

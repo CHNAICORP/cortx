@@ -4,8 +4,8 @@
 import * as fs from "fs";
 import * as path from "path";
 import { execSync, spawnSync } from "child_process";
-import { registry } from "../core/registry";
-import { RiskLevel, Capability } from "../core/types";
+import { registry } from '../core/registry.js';
+import { RiskLevel, Capability } from '../core/types.js';
 
 registry.register("执行系统命令", RiskLevel.SYSTEM, Capability.SHELL,
   { workDir: "string", command: "string" },

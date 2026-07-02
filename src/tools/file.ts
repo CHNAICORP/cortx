@@ -3,8 +3,8 @@
  */
 import * as fs from "fs";
 import * as path from "path";
-import { registry } from "../core/registry";
-import { RiskLevel, Capability } from "../core/types";
+import { registry } from '../core/registry.js';
+import { RiskLevel, Capability } from '../core/types.js';
 
 registry.register(
   "列出目录内的文件和子目录",

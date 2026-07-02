@@ -2,7 +2,7 @@
  * LLM Provider — DeepSeek / OpenAI 流式 + 非流式
  * 与 Python llm.py 完全对应
  */
-import { Message, FunctionSchema, CacheStats } from "./types";
+import { Message, FunctionSchema, CacheStats } from './types.js';
 
 interface LLMConfig {
   apiKey: string;

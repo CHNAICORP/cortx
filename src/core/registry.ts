@@ -1,7 +1,7 @@
 /**
  * 工具注册表 — 与 Python ToolRegistry 完全对应
  */
-import { ToolFn, ToolMeta, FunctionSchema, RiskLevel, Capability } from "./types";
+import { ToolFn, ToolMeta, FunctionSchema, RiskLevel, Capability } from './types.js';
 
 const TYPE_MAP: Record<string, string> = {
   string: "string",

@@ -1,8 +1,8 @@
 /**
  * 网络工具 — web_search + web_fetch
  */
-import { registry } from "../core/registry";
-import { RiskLevel, Capability } from "../core/types";
+import { registry } from '../core/registry.js';
+import { RiskLevel, Capability } from '../core/types.js';
 
 registry.register(
   "联网搜索网页",

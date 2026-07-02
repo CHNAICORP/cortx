@@ -1,9 +1,9 @@
 /**
  * 代理 + 镜像工具
  */
-import { registry } from "../core/registry";
-import { RiskLevel, Capability } from "../core/types";
-import { MCP_REGISTRY } from "./mcp";
+import { registry } from '../core/registry.js';
+import { RiskLevel, Capability } from '../core/types.js';
+import { MCP_REGISTRY } from './mcp.js';
 
 registry.register("设置HTTP代理", RiskLevel.WRITE, Capability.FS_WRITE,
   { workDir: "string", http: "string", https: "string" },

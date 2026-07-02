@@ -8,10 +8,10 @@ import * as os from "os";
 import {
   AgentConfig, DEFAULT_CONFIG, Capability, AuditVerdict,
   Message, RunTrace, StepRecord, CacheStats,
-} from "./types";
-import { registry } from "./registry";
-import { PolicyEngine } from "./policy";
-import { LLMProvider, ParsedToolCall } from "./llm";
+} from './types.js';
+import { registry } from './registry.js';
+import { PolicyEngine } from './policy.js';
+import { LLMProvider, ParsedToolCall } from './llm.js';
 
 // ── 默认系统提示 ──
 const DEFAULT_SYSTEM = [
@@ -361,4 +361,4 @@ export class CortexAgent {
 }
 
 // 导出 LLMProvider 供 CLI 使用
-export { LLMProvider } from "./llm";
+export { LLMProvider } from './llm.js';

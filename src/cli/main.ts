@@ -4,19 +4,19 @@
  * 与 Python main.py 完全对应
  */
 import * as readline from "readline";
-import { CortexAgent, LLMProvider } from "../core/loop";
-import { registry } from "../core/registry";
-import { loadSettings, getApiKey, getBaseUrl } from "../config";
+import { CortexAgent, LLMProvider } from '../core/loop.js';
+import { registry } from '../core/registry.js';
+import { loadSettings, getApiKey, getBaseUrl } from '../config.js';
 
 // Register tools (lazy import to avoid circular deps)
 async function loadTools(): Promise<void> {
-  await import("../tools/file");
-  await import("../tools/net");
-  await import("../tools/exec");
-  await import("../tools/memory");
-  await import("../tools/mcp");
-  await import("../tools/browser");
-  await import("../tools/proxy");
+  await import("../tools/file.js");
+  await import("../tools/net.js");
+  await import("../tools/exec.js");
+  await import("../tools/memory.js");
+  await import("../tools/mcp.js");
+  await import("../tools/browser.js");
+  await import("../tools/proxy.js");
   console.error(`[cortex] ${registry.schemaList.length} tools loaded`);
 }
 

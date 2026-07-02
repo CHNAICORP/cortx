@@ -2,8 +2,8 @@
  * MCP 客户端 + 注册表
  */
 import { spawnSync } from "child_process";
-import { registry } from "../core/registry";
-import { RiskLevel, Capability } from "../core/types";
+import { registry } from '../core/registry.js';
+import { RiskLevel, Capability } from '../core/types.js';
 
 export const MCP_REGISTRY: Record<string, { name: string; desc: string; category: string; install: string[]; requires: string }> = {
   playwright: { name: "Playwright MCP", desc: "浏览器自动化（Microsoft 官方）", category: "browser", install: ["npx", "-y", "@playwright/mcp@latest"], requires: "node" },
