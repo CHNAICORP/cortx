@@ -11,7 +11,7 @@
 
 ```bash
 pip install cortx                    # Python
-npm install -g cortx      # TypeScript
+npm install -g @chnaicorp/cortx      # TypeScript
 ctx                                # 运行（仅 3 字母）
 ```
 
@@ -95,7 +95,7 @@ npm publish
 ### 2.3 验证安装
 
 ```bash
-npm install -g cortx
+npm install -g @chnaicorp/cortx
 ctx --no-stream -q "hello"
 ```
 
@@ -138,7 +138,7 @@ npx tsc && npm publish
 
 # 4. 验证
 pip install --upgrade ctx && ctx --version
-npm install -g cortx@latest && ctx --version
+npm install -g @chnaicorp/cortx@latest && ctx --version
 ```
 
 ### 3.3 版本号规范 (SemVer)

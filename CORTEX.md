@@ -104,7 +104,7 @@ pip install cortx
 ctx --model pro
 
 # TypeScript
-npm install -g cortx
+npm install -g @chnaicorp/cortx
 ctx --model pro
 
 # REPL 命令

@@ -17,10 +17,10 @@
 |---|--------|-----------|
 | 位置 | `python/cortex_agent/` | `src/` |
 | 工具数 | 43 | 43 |
-| 安装 | `pip install cortx` | `npm install -g cortx` |
+| 安装 | `pip install cortx` | `npm install -g @chnaicorp/cortx` |
 | CLI 命令 | `ctx` | `ctx` |
 
-> 💡 **PyPI: `pip install cortx`，npm: `npm install -g cortx`。运行只需 `ctx`**
+> 💡 **PyPI: `pip install cortx`，npm: `npm install -g @chnaicorp/cortx`。运行只需 `ctx`**
 
 ---
 
@@ -32,7 +32,7 @@ pip install cortx
 ctx
 
 # TypeScript
-npm install -g cortx
+npm install -g @chnaicorp/cortx
 ctx
 ctx                         # 交互 REPL
 ctx -q "hello"              # 单次查询
