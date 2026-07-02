@@ -23,6 +23,7 @@ import tools_mcp as _
 import tools_browser as _
 import tools_computer as _
 import tools_network as _
+import tools_rag as _
 del _
 
 

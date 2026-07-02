@@ -576,3 +576,6 @@ def csv_query(work_dir: str, path: str, query: str = "SELECT * LIMIT 50") -> str
     except Exception as e:
         return f"(x) {e}"
 
+
+
+# ══════════════════════════════════════════════════════════════

@@ -5,8 +5,8 @@
 ## 开发环境
 
 ```bash
-git clone <repo-url>
-cd harness_agent
+git clone https://github.com/<user>/cortex-agent.git
+cd cortex-agent
 pip install -r requirements.txt
 ```
 
