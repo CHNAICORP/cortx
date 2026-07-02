@@ -12,7 +12,7 @@ Cortex Agent CLI — 入口 + 工厂函数
   python main.py --init-config            # 创建默认 .cortex/settings.json
 """
 
-import os, sys, sqlite3, glob as _glob
+import os, sys, sqlite3, glob as _glob, json
 from .cortex_agent import CortexAgent, AgentConfig, LLMProvider, registry
 from .terminal import Terminal
 from .config import load_settings, apply_to_config, create_default_settings
@@ -49,6 +49,63 @@ def create_agent(model: str = None, work_dir: str = None, api_key: str = None,
     db.execute("INSERT OR IGNORE INTO users VALUES (1,'Alice',28),(2,'Bob',32),(3,'Carol',25)")
     db.commit(); db.close()
     return agent
+
+
+def setup_wizard(config: 'AgentConfig', settings: dict) -> 'AgentConfig':
+    """首次运行配置向导。"""
+    t = Terminal(enabled=True)
+    t._w(f"\n{t.CYAN}{'='*50}{t.RESET}\n")
+    t._w(f"  🎉 欢迎使用 Cortx！\n")
+    t._w(f"  这是第一次运行，需要配置 AI 模型。\n")
+    t._w(f"{t.CYAN}{'='*50}{t.RESET}\n\n")
+
+    # 1. Provider
+    providers = {"1": "deepseek", "2": "openai"}
+    t._w(f"  {t.YELLOW}选择模型提供商:{t.RESET}\n")
+    t._w(f"    [1] DeepSeek (推荐，国内可用)\n")
+    t._w(f"    [2] OpenAI\n")
+    choice = input(f"  {t.GREEN}请选择 (1/2):{t.RESET} ").strip() or "1"
+    provider = providers.get(choice, "deepseek")
+
+    # 2. API Key
+    t._w(f"\n  {t.YELLOW}输入 API Key:{t.RESET}\n")
+    t._w(f"  {t.GRAY}(DeepSeek: https://platform.deepseek.com/api_keys){t.RESET}\n")
+    t._w(f"  {t.GRAY}(OpenAI: https://platform.openai.com/api-keys){t.RESET}\n")
+    api_key = input(f"  {t.GREEN}API Key:{t.RESET} ").strip()
+    while not api_key:
+        t._w(f"  {t.RED}API Key 不能为空{t.RESET}\n")
+        api_key = input(f"  {t.GREEN}API Key:{t.RESET} ").strip()
+
+    # 3. Model
+    models = {"deepseek": {"1": ("pro", "deepseek-v4-pro"), "2": ("flash", "deepseek-v4-flash")},
+              "openai": {"1": ("gpt-4o", "gpt-4o"), "2": ("gpt-4o-mini", "gpt-4o-mini")}}
+    t._w(f"\n  {t.YELLOW}选择模型:{t.RESET}\n")
+    for k, (alias, name) in models.get(provider, {}).items():
+        t._w(f"    [{k}] {alias} ({name})\n")
+    m_choice = input(f"  {t.GREEN}请选择 (1/2):{t.RESET} ").strip() or "1"
+    model_alias, model_name = models.get(provider, {}).get(m_choice, ("pro", "deepseek-v4-pro"))
+
+    # 4. Save
+    user_path = os.path.join(os.path.expanduser("~"), ".cortex", "settings.json")
+    new_settings = {
+        "model": model_alias,
+        "provider": provider,
+        "providers": {provider: {"api_key": api_key, "base_url": f"https://api.{provider}.com/v1",
+                                  "models": {model_alias: model_name}}},
+        "max_steps": 10, "context_limit": 1000000, "permission_mode": "standard",
+        "auto_extract_memory": True, "memory_enabled": True, "sessions_enabled": True,
+    }
+    os.makedirs(os.path.dirname(user_path), exist_ok=True)
+    with open(user_path, "w", encoding="utf-8") as f:
+        json.dump(new_settings, f, ensure_ascii=False, indent=2)
+
+    t._w(f"\n  {t.GREEN}✅ 配置已保存到 {user_path}{t.RESET}\n")
+    t._w(f"  {t.CYAN}启动 Cortx...{t.RESET}\n\n")
+
+    config.api_key = api_key
+    config.model = model_name
+    LLMProvider.setup(new_settings["providers"], provider)
+    return config
 
 
 def main():
@@ -90,6 +147,24 @@ def main():
         return
 
     term = Terminal(enabled=not args.no_stream)
+
+    # 首次运行：检查 API Key 是否配置
+    settings = load_settings()
+    provider = settings.get("provider", "deepseek")
+    has_api_key = (settings.get("providers", {}).get(provider, {}).get("api_key", "")
+                   or settings.get("api_key", ""))
+    if not has_api_key:
+        if term.enabled:
+            config = AgentConfig()
+            apply_to_config(config, settings)
+            setup_wizard(config, settings)
+            # 重新加载 settings（向导已写入）
+            settings = load_settings()
+        else:
+            print("\n  ⚠️  未配置 API Key。\n"
+                  "  交互模式运行 ctx 进入配置向导，或编辑 ~/.cortex/settings.json\n")
+            sys.exit(1)
+
     agent = create_agent(model=args.model if args.model != "flash" else None,
                          work_dir=args.work_dir, max_steps=args.max_steps, term=term)
     if args.mode:
