@@ -4,11 +4,11 @@
 
 | | 包名 | CLI 命令 | 原因 |
 |---|------|---------|------|
-| PyPI | `cortex-agent` | `ctx` | 包名描述性强（搜索引擎友好），CLI 短（对比 `claude` 6 字母 / `codex` 5 字母 / `ctx` 3 字母） |
-| npm | `cortex-agent` | `ctx` | 同上 |
+| PyPI | `ctx` | `ctx` | 包名描述性强（搜索引擎友好），CLI 短（对比 `claude` 6 字母 / `codex` 5 字母 / `ctx` 3 字母） |
+| npm | `ctx` | `ctx` | 同上 |
 
 ```bash
-pip install cortex-agent   # 安装
+pip install ctx   # 安装
 ctx                        # 运行（仅 3 字母）
 ```
 
@@ -23,7 +23,7 @@ ctx                        # 运行（仅 3 字母）
 pip install build twine
 
 # 在 https://pypi.org/manage/account/token/ 创建 API Token
-# Token 名: cortex-agent-upload
+# Token 名: ctx-upload
 # 权限: 上传到项目
 ```
 
@@ -39,7 +39,7 @@ rm -rf dist build *.egg-info
 python -m build
 
 # 检查包内容
-tar -tzf dist/cortex-agent-1.0.0.tar.gz | head -20
+tar -tzf dist/ctx-1.0.0.tar.gz | head -20
 
 # 上传到 PyPI
 twine upload dist/* -u __token__ -p <YOUR_PYPI_TOKEN>
@@ -53,7 +53,7 @@ twine upload dist/*
 ### 1.3 验证安装
 
 ```bash
-pip install cortex-agent
+pip install ctx
 ctx --help
 ctx --no-stream -q "hello"
 ```
@@ -92,7 +92,7 @@ npm publish
 ### 2.3 验证安装
 
 ```bash
-npm install -g cortex-agent
+npm install -g ctx
 ctx --no-stream -q "hello"
 ```
 
@@ -132,8 +132,8 @@ twine upload dist/*
 npx tsc && npm publish
 
 # 4. 验证
-pip install --upgrade cortex-agent && ctx --version
-npm install -g cortex-agent@latest && ctx --version
+pip install --upgrade ctx && ctx --version
+npm install -g ctx@latest && ctx --version
 ```
 
 ### 3.3 版本号规范 (SemVer)
@@ -181,13 +181,13 @@ jobs:
 
 ## 五、常见问题
 
-### Q: 包名 `cortex-agent` 已被占用？
+### Q: 包名 `ctx` 已被占用？
 ```bash
 # PyPI: 修改 pyproject.toml 中 name
-name = "cortex-agent-xxx"
+name = "ctx-xxx"
 
 # npm: 修改 package.json 中 name
-"name": "cortex-agent-xxx"
+"name": "ctx-xxx"
 ```
 
 ### Q: twine upload 失败 "File already exists"？
@@ -198,4 +198,4 @@ name = "cortex-agent-xxx"
 
 ### Q: 如何撤回错误版本？
 - PyPI: `twine upload --skip-existing` 重新构建不同版本
-- npm: `npm unpublish cortex-agent@1.0.0`（72小时内）
+- npm: `npm unpublish ctx@1.0.0`（72小时内）

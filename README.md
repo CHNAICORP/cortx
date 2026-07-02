@@ -17,19 +17,24 @@
 |---|--------|-----------|
 | 位置 | `python/cortex_agent/` | `src/` |
 | 工具数 | 43 | 43 |
-| 安装 | `pip install cortex-agent` | `npm install -g cortex-agent` |
+| 安装 | `pip install ctx` | `npm install -g cortex-agent` |
 | CLI 命令 | `ctx` (仅 3 字母 👑) | `ctx` |
 
-> 💡 **包名 `cortex-agent` 用于 PyPI/npm 搜索发现，日常使用仅需 `ctx`** — 对比 `claude`(6字母) / `codex`(5字母)
+> 💡 **PyPI: `pip install ctx`（短名可用），npm: `npm install -g cortex-agent`（`ctx` 被占）。日常运行仅需 `ctx`**
 
 ---
 
 ## 快速开始
 
 ```bash
-# 一行安装
-pip install cortex-agent    # Python
-npm install -g cortex-agent # TypeScript
+# Python (3 字母包名)
+pip install ctx
+ctx
+
+# TypeScript
+npm install -g cortex-agent
+ctx
+npm install -g ctx # TypeScript
 
 # 一行启动
 ctx                         # 交互 REPL
@@ -62,7 +67,7 @@ ctx -q "用 Python 写斐波那契函数"
 ## 项目结构
 
 ```
-cortex-agent/
+ctx/
 ├── python/cortex_agent/        # Python 包
 │   ├── cortex_agent.py          # Agentic Loop 核心引擎
 │   ├── policy.py                # PolicyEngine 安全策略

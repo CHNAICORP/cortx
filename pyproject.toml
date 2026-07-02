@@ -3,7 +3,7 @@ requires = ["setuptools>=75", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "cortex-agent"
+name = "ctx"
 version = "1.0.0"
 description = "安全可控的 AI Agent 运行时框架 — Harness Agent 架构 + Agentic Loop 引擎"
 readme = "README.md"
@@ -36,7 +36,6 @@ dev = [
 ]
 
 [project.scripts]
-cortex-agent = "cortex_agent.main:main"
 ctx = "cortex_agent.main:main"
 
 [tool.setuptools.packages.find]
