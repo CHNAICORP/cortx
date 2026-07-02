@@ -368,21 +368,20 @@ class CortexAgent:
         self.config = config or AgentConfig()
         wd = os.path.realpath(self.config.work_dir)
         os.makedirs(wd, exist_ok=True)
-        # keep workspace alive
         with open(os.path.join(wd, '.gitkeep'), 'w') as f: f.write('')
         self.policy = PolicyEngine(wd, self.config)
         self.executor = ToolExecutor(registry, wd, self.config.tool_timeout)
-        # ── Memory & Session infrastructure ──
+        # ── Runtime state (工作区 = 运行时产物) ──
         import memory as mem_module
         cwd = os.getcwd()
-        memory_path = self.config.memory_dir or os.path.join(cwd, '.cortex', 'memory.md')
-        sessions_dir = self.config.sessions_dir or os.path.join(cwd, '.cortex', 'sessions')
-        # Module-level project dirs (for tools.py access)
+        # 记忆/会话/目标 → cortex_workspace/ (运行时产物)
+        memory_path = self.config.memory_dir or os.path.join(wd, 'memory.md')
+        sessions_dir = self.config.sessions_dir or os.path.join(wd, 'sessions')
         setattr(sys.modules[__name__], '_project_memory_path', memory_path)
         setattr(sys.modules[__name__], '_project_sessions_dir', sessions_dir)
         self.memory = mem_module.MemoryStore(memory_path) if self.config.memory_enabled else None
         self.sessions = mem_module.SessionStore(sessions_dir) if self.config.sessions_enabled else None
-        # ── Skills infrastructure ──
+        # 技能/配置 → .cortex/ (项目配置, Git 追踪)
         import skills as _skills
         skills_dir = self.config.skills_dir or os.path.join(cwd, '.cortex', 'skills')
         self.skill_mgr = _skills.SkillManager()
@@ -712,8 +711,8 @@ class CortexAgent:
     
     @property
     def goal(self) -> str:
-        """读取当前持久化目标（存储在项目根 .cortex/GOAL.txt）。"""
-        goal_file = os.path.join(self._project_dir(), '.cortex', 'GOAL.txt')
+        """读取持久化目标（存储在 cortex_workspace/GOAL.txt）。"""
+        goal_file = os.path.join(self._work_dir_path(), 'GOAL.txt')
         if os.path.isfile(goal_file):
             try:
                 with open(goal_file, 'r', encoding='utf-8') as f:
@@ -723,10 +722,8 @@ class CortexAgent:
         return ""
 
     def set_goal(self, text: str) -> str:
-        """设置持久化目标（跨会话保持）。空文本=清除目标。"""
-        goal_dir = os.path.join(self._project_dir(), '.cortex')
-        os.makedirs(goal_dir, exist_ok=True)
-        goal_file = os.path.join(goal_dir, 'GOAL.txt')
+        """设置持久化目标。空文本=清除。"""
+        goal_file = os.path.join(self._work_dir_path(), 'GOAL.txt')
         if text.strip():
             with open(goal_file, 'w', encoding='utf-8') as f:
                 f.write(text.strip())
