@@ -207,8 +207,8 @@ export class CortexAgent {
   private sessionId: string | null = null;
   private queryCount = 0;
   private stepCountTotal = 0;
-  private memory: MemoryStore | null = null;
-  private sessions: SessionStore | null = null;
+  private _memory: MemoryStore | null = null;
+  private _sessions: SessionStore | null = null;
   private term: {
     thinkToken: (t: string) => void;
     answerToken: (t: string) => void;
@@ -216,6 +216,7 @@ export class CortexAgent {
     toolDone: (ok: boolean, ms: number, p: string) => void;
     closeThinking: () => void;
     nextRound: () => void;
+    write: (s: string) => void;
   } | null = null;
 
   setTerm(t: typeof this.term) { this.term = t; }
@@ -237,8 +238,8 @@ export class CortexAgent {
     // ── 记忆 + 会话存储 ──
     const memoryPath = this.config.memoryDir || path.join(wd, "memory.md");
     const sessionsDir = this.config.sessionsDir || path.join(wd, "sessions");
-    this.memory = this.config.memoryEnabled ? new MemoryStore(memoryPath) : null;
-    this.sessions = this.config.sessionsEnabled ? new SessionStore(sessionsDir) : null;
+    this._memory = this.config.memoryEnabled ? new MemoryStore(memoryPath) : null;
+    this._sessions = this.config.sessionsEnabled ? new SessionStore(sessionsDir) : null;
 
     this.llm = new LLMProvider({
       apiKey: this.config.apiKey,
@@ -252,9 +253,9 @@ export class CortexAgent {
 
   private _makeGovernor(): void {
     const kb = ContextGovernor.loadKb(process.cwd());
-    const memoryCtx = this.memory?.toSystemContext() || "";
-    const historySummary = (this.sessions && this.sessionId)
-      ? (this.sessions.getHistorySummary(this.sessionId) || "") : "";
+    const memoryCtx = this._memory?.toSystemContext() || "";
+    const historySummary = (this._sessions && this.sessionId)
+      ? (this._sessions.getHistorySummary(this.sessionId) || "") : "";
     this.governor = new ContextGovernor({
       system: this.config.systemPrompt,
       workDir: this.config.workDir,
@@ -280,11 +281,11 @@ export class CortexAgent {
 
   initSession(sessionId?: string, resume = false): string {
     this._makeGovernor();
-    if (resume && this.sessions) {
-      const sid = sessionId || this.sessions.getLastSession() || "";
+    if (resume && this._sessions) {
+      const sid = sessionId || this._sessions.getLastSession() || "";
       if (sid) {
         try {
-          const [savedCtx, meta] = this.sessions.load(sid);
+          const [savedCtx, meta] = this._sessions.load(sid);
           // Preserve full message structure including tool_calls and tool_call_id
           const typedCtx: Message[] = savedCtx.map((m: any) => ({
             role: (m.role || "user") as Message["role"],
@@ -304,7 +305,7 @@ export class CortexAgent {
         } catch { /* fall through to create new */ }
       }
     }
-    const sid = sessionId || (this.sessions?.generateId() || "default");
+    const sid = sessionId || (this._sessions?.generateId() || "default");
     this.sessionId = sid;
     this.queryCount = 0;
     this.stepCountTotal = 0;
@@ -315,6 +316,55 @@ export class CortexAgent {
   get sessionIdStr(): string | null { return this.sessionId; }
 
   get lastTrace(): RunTrace | null { return this.trace; }
+
+  get contextLimit(): number { return this.config.contextLimit; }
+
+  /** @internal Public for CLI access — matches Python's public attribute */
+  get sessions(): SessionStore | null { return this._sessions; }
+  get memoryStore(): MemoryStore | null { return this._memory; }
+
+  switchModel(alias: string): void {
+    this.llm.switch(alias); this.config.model = this.llm.model;
+  }
+
+  switchPermissionMode(mode: string): string {
+    const m = mode.toLowerCase().trim();
+    if (["s", "std", "standard"].includes(m)) {
+      this.config.permissionMode = "standard";
+      return "standard — SAFE自动 / WRITE区内 / SYSTEM需确认";
+    } else if (["a", "auto", "auto-edit", "edit"].includes(m)) {
+      this.config.permissionMode = "auto";
+      return "auto — 自动批准编辑 + SYSTEM放行";
+    } else if (["y", "yolo", "full", "bypass"].includes(m)) {
+      this.config.permissionMode = "yolo";
+      return "yolo — 全部放行（⚠️ 路径穿越不设防）";
+    }
+    return `(x) 未知模式: ${mode}\n可用: standard | auto | yolo`;
+  }
+
+  async chat(query: string, maxSteps?: number): Promise<string> {
+    return this.run(query, maxSteps, true);
+  }
+
+  get goal(): string {
+    const goalFile = path.join(this.config.workDir, "GOAL.txt");
+    if (fs.existsSync(goalFile)) {
+      try { return fs.readFileSync(goalFile, "utf-8").trim(); } catch { return ""; }
+    }
+    return "";
+  }
+
+  setGoal(text: string): string {
+    const goalFile = path.join(this.config.workDir, "GOAL.txt");
+    if (text.trim()) {
+      fs.writeFileSync(goalFile, text.trim(), "utf-8");
+      this.ctx.push({ role: "user", content: `[目标] ${text.trim()}` });
+      return text.trim();
+    } else {
+      if (fs.existsSync(goalFile)) fs.unlinkSync(goalFile);
+      return "";
+    }
+  }
 
   async run(query: string, maxSteps?: number, keepHistory = false): Promise<string> {
     if (!keepHistory || this.ctx.length === 0) {
@@ -327,7 +377,7 @@ export class CortexAgent {
     this.stepCountTotal += this.trace?.steps.length || 0;
     this._autoSave();
     // ── Auto-extract memory facts for next session ──
-    if (this.config.autoExtractMemory && this.memory) {
+    if (this.config.autoExtractMemory && this._memory) {
       this._autoExtractFacts(query);
     }
     return result ?? "";
@@ -342,13 +392,13 @@ export class CortexAgent {
    *   - Key search/fetch results as condensed memory entries
    */
   private _autoExtractFacts(_userQuery: string): void {
-    if (!this.memory) return;
+    if (!this._memory) return;
     const steps = this.trace?.steps || [];
     const toolNames = steps.map(s => s.toolName);
     // Only auto-bookmark if no explicit remember_fact was already called
     if (!toolNames.includes("remember_fact")) {
       const summary = _userQuery.slice(0, 80).replace(/\n/g, " ");
-      this.memory.append(`查询: ${summary}`);
+      this._memory.append(`查询: ${summary}`);
     }
     // Auto-extract web_search result summaries (URL + title) into memory
     for (const step of steps) {
@@ -358,7 +408,7 @@ export class CortexAgent {
         const match = result.match(/\[1\] (.*?)(?:\n|$)/);
         if (match) {
           const firstResult = match[1].trim().slice(0, 100);
-          this.memory.append(`搜索到: ${firstResult}`);
+          this._memory.append(`搜索到: ${firstResult}`);
         }
       }
       if (step.toolName === "web_fetch" && step.success && step.resultPreview.includes("--- ")) {
@@ -367,16 +417,16 @@ export class CortexAgent {
         if (urlMatch) {
           const url = urlMatch[1];
           const summary = step.resultPreview.slice(0, 200).replace(/\n/g, " ");
-          this.memory.append(`抓取: ${url}`);
+          this._memory.append(`抓取: ${url}`);
         }
       }
     }
   }
 
   private _autoSave(): void {
-    if (!this.sessions || !this.sessionId) return;
+    if (!this._sessions || !this.sessionId) return;
     try {
-      this.sessions.save(this.sessionId, this.ctx as any, {
+      this._sessions.save(this.sessionId, this.ctx as any, {
         session_id: this.sessionId,
         last_active: new Date().toISOString(),
         model: this.config.model,
@@ -390,8 +440,8 @@ export class CortexAgent {
   }
 
   saveSession(label?: string): string {
-    if (!this.sessions || !this.sessionId) return "";
-    this.sessions.save(this.sessionId, this.ctx as any, {
+    if (!this._sessions || !this.sessionId) return "";
+    this._sessions.save(this.sessionId, this.ctx as any, {
       session_id: this.sessionId,
       label: label || "",
       last_active: new Date().toISOString(),
@@ -442,6 +492,7 @@ export class CortexAgent {
 
   private async _loop(maxSteps: number): Promise<string> {
     this.trace = this.observer.createTrace(this.ctx[this.ctx.length - 1]?.content || "");
+    if (this.term) this.term.nextRound();
     for (let stepNo = 1; stepNo <= maxSteps; stepNo++) {
       this.ctx = this.governor.govern(this.ctx);
       const { text, toolCalls, reasoning } = await this._think();
@@ -512,7 +563,13 @@ export class CortexAgent {
       if (convergence !== null) return convergence;
     }
     this.trace.stepLimitReached = true;
-    return "[超步数] 未能完成";
+    const msg = "[超步数] 未能完成";
+    if (this.term) {
+      this.term.closeThinking();
+      this.term.write(`\n${msg}\n`);
+      return "";
+    }
+    return msg;
   }
 
   private async _reflect(trace: RunTrace, stepNo: number, maxSteps: number): Promise<string | null> {
@@ -522,18 +579,33 @@ export class CortexAgent {
       if (text) {
         trace.finalAnswer = text;
         if (toolCalls && toolCalls.length > 0) {
+          // Text was streamed, but the suffix is not — print it to terminal
+          if (this.term) {
+            this.term.closeThinking();
+            this.term.write("\n\n[已达最大步数，工具调用未执行]");
+            return "";
+          }
           return text + "\n\n[已达最大步数，工具调用未执行]";
         }
-        return text;
+        // Text was already streamed via callStream — return "" for terminal mode
+        return this.term ? "" : text;
       }
-      // LLM returned empty — summarize what we did collect from tool results
+      // LLM returned empty (API failure after retries) — display fallback to terminal
+      let fallback: string;
       if (trace.steps.length > 0) {
         const lastResults = trace.steps.slice(-3).map(s =>
           `[${s.toolName}] ${s.resultPreview}`
         ).join("\n");
-        return `[达到最大步数 ${maxSteps} 步，无法生成完整回答]\n\n最后一次工具调用结果:\n${lastResults}\n\n请尝试用更具体的问题重新查询，或增加 --max-steps 参数。`;
+        fallback = `[达到最大步数 ${maxSteps} 步，无法生成完整回答]\n\n最后一次工具调用结果:\n${lastResults}\n\n请尝试用更具体的问题重新查询，或增加 --max-steps 参数。`;
+      } else {
+        fallback = "[达到最大步数]";
       }
-      return "[达到最大步数]";
+      if (this.term) {
+        this.term.closeThinking();
+        this.term.write(`\n${fallback}\n`);
+        return "";
+      }
+      return fallback;
     }
     return null;
   }

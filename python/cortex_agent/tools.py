@@ -222,40 +222,119 @@ def _build_opener():
 # ══════════════════════════════════════════════════════════════
 # 网络
 #
-# 设计参照 Claude Code:
-#   WebSearch → 找页面 (标题+URL+摘要)
-#   WebFetch  → 读内容 (HTML→文本，截断至 8KB)
+# 设计参照 Claude Code 的 WebSearch / WebFetch:
+#   web_search → 找页面 (标题+URL+摘要)，支持域名过滤、结果去重
+#   web_fetch  → 读内容 (HTML→可读文本)，支持截断控制、元数据提取
 #
-# 多引擎 fallback:
-#   1. DuckDuckGo Instant Answer API (JSON — 最快)
-#   2. DuckDuckGo Lite (HTML 抓取 — fallback)
+# Harness Agent 设计哲学:
+#   1. 工具即原语 — 搜索和抓取职责分离，LLM 自主决定何时用哪个
+#   2. LLM 可控 — 关键参数暴露给 LLM (allowed_domains, max_chars 等)
+#   3. 优雅降级 — 多引擎 fallback 链，每步失败有清晰日志
+#   4. 结构化输出 — 结果格式统一，便于 LLM 推理
+#   5. 可观测性 — 每条结果标注来源引擎
 # ══════════════════════════════════════════════════════════════
+
+# 搜索结果缓存 (避免同一查询重复请求)
+_search_cache: dict = {}
+_SEARCH_CACHE_MAX = 50
+
+
+def _filter_domains(url: str, allowed: list = None, blocked: list = None) -> bool:
+    """检查 URL 的域名是否通过过滤。"""
+    try:
+        host = urllib.parse.urlparse(url).hostname or ""
+        host = host.lower()
+        if blocked:
+            for d in blocked:
+                if host == d.lower() or host.endswith("." + d.lower()):
+                    return False
+        if allowed:
+            for d in allowed:
+                if host == d.lower() or host.endswith("." + d.lower()):
+                    return True
+            return False
+        return True
+    except Exception:
+        return True
+
+
+def _dedup_results(results: list) -> list:
+    """对搜索结果去重 (基于 URL hostname+path)。"""
+    seen = set()
+    deduped = []
+    for item in results:
+        url = item.get("url", "")
+        try:
+            p = urllib.parse.urlparse(url)
+            key = (p.hostname or "").lower() + (p.path or "").rstrip("/").lower()
+        except Exception:
+            key = url.lower()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(item)
+    return deduped
+
+
+def _format_search_results(query: str, engine: str, results: list) -> str:
+    """统一格式化搜索结果输出。"""
+    if not results:
+        return ""
+    out = [f'搜索 "{query}" via {engine} ({len(results)} 条):\n']
+    for i, r in enumerate(results, 1):
+        title = r.get("title", "")[:120]
+        url = r.get("url", "")
+        snippet = r.get("snippet", "")[:200]
+        out.append(f"  [{i}] {title}")
+        out.append(f"      🔗 {url}")
+        if snippet:
+            out.append(f"      {snippet}")
+        out.append("")
+    return "\n".join(out)
+
 
 @registry.register(
     "联网搜索网页 — 返回标题、URL 和摘要。找到页面后可用 web_fetch 读取全文。\n"
-    "用法: web_search(query=\"Python 3.13 新特性\")",
+    "参数:\n"
+    "  query           搜索关键词 (必填)\n"
+    "  allowed_domains 限定搜索域名，逗号分隔 (可选，如 'github.com,stackoverflow.com')\n"
+    "  max_results     最大结果数 (可选，默认 5)\n"
+    "用法: web_search(query=\"Python 3.13 新特性\")\n"
+    "      web_search(query=\"React hooks\", allowed_domains=\"reactjs.org,github.com\")",
     risk=RiskLevel.SAFE, capability=Capability.NET_SEARCH)
-def web_search(work_dir: str, query: str) -> str:
-    """多引擎联网搜索。
+def web_search(work_dir: str, query: str, allowed_domains: str = "",
+               max_results: int = 0) -> str:
+    """多引擎联网搜索，支持域名过滤和结果去重。
 
-    优先级（由 settings.json 中 web_search.provider 决定）:
-      duckduckgo  → DuckDuckGo API → DuckDuckGo Lite (免费, 默认)
+    引擎优先级 (由 settings.json 中 web_search.provider 决定):
       brave       → Brave Search API (付费, 更高精准度)
-      serpapi     → SerpAPI / Google (付费, 结果最丰富)
       tavily      → Tavily Search API (付费, AI 优化摘要)
-    未配置则回退到 duckduckgo。
+      serpapi     → SerpAPI / Google (付费, 结果最丰富)
+      duckduckgo  → DDG API → DDG Lite → Bing HTML (免费, 默认)
     """
+    # ── 解析参数 ──
     cfg = _load_web_search_config()
     provider = cfg.get("provider", "duckduckgo")
-    max_results = int(cfg.get("max_results", 5))
+    n = int(max_results) if max_results and int(max_results) > 0 else int(cfg.get("max_results", 5))
     timeout = int(cfg.get("timeout", 10))
     opener = _build_opener()
     encoded = urllib.parse.quote(query)
 
+    allowed = [d.strip() for d in allowed_domains.split(",") if d.strip()] if allowed_domains else None
+    blocked = ["bing.com", "duckduckgo.com", "google.com", "baidu.com", "csdn.net"]
+
+    # ── 检查缓存 ──
+    cache_key = f"{query}|{allowed or ''}|{n}"
+    if cache_key in _search_cache:
+        cached = _search_cache[cache_key]
+        return cached + "\n[缓存命中]"
+
+    raw_results: list = []
+    engine_used = ""
+
     # ── Brave Search API ──
     if provider == "brave" and cfg.get("brave_api_key"):
         try:
-            api_url = f"https://api.search.brave.com/res/v1/web/search?q={encoded}&count={max_results}"
+            api_url = f"https://api.search.brave.com/res/v1/web/search?q={encoded}&count={n}"
             req = urllib.request.Request(api_url, headers={
                 "User-Agent": "Mozilla/5.0 (compatible; CortexAgent/1.0)",
                 "Accept": "application/json",
@@ -264,29 +343,23 @@ def web_search(work_dir: str, query: str) -> str:
             })
             with opener.open(req, timeout=timeout) as r:
                 data = json.loads(r.read().decode("utf-8", errors="ignore"))
-            results = []
-            for item in (data.get("web", {}).get("results", []) or [])[:max_results]:
-                title = item.get("title", "")
-                url = item.get("url", "")
-                desc = item.get("description", "")
-                if title and url:
-                    results.append(f"[{len(results)+1}] {title}\n    URL: {url}")
-                    if desc:
-                        results.append(f"    {desc[:200]}")
-            if results:
-                return f"搜索 \"{query}\" via Brave ({len(results)} 条):\n\n" + "\n\n".join(results)
-        except Exception as e:
-            pass  # fall through to next provider
+            for item in (data.get("web", {}).get("results", []) or [])[:n * 2]:
+                raw_results.append({
+                    "title": item.get("title", ""),
+                    "url": item.get("url", ""),
+                    "snippet": item.get("description", ""),
+                })
+            engine_used = "Brave"
+        except Exception:
+            pass
 
     # ── Tavily Search API ──
-    if provider == "tavily" and cfg.get("tavily_api_key"):
+    if not raw_results and provider == "tavily" and cfg.get("tavily_api_key"):
         try:
             api_url = "https://api.tavily.com/search"
             body = json.dumps({
                 "api_key": cfg["tavily_api_key"],
-                "query": query,
-                "max_results": max_results,
-                "search_depth": "basic",
+                "query": query, "max_results": n * 2, "search_depth": "basic",
             }).encode()
             req = urllib.request.Request(api_url, data=body, headers={
                 "User-Agent": "Mozilla/5.0 (compatible; CortexAgent/1.0)",
@@ -295,137 +368,146 @@ def web_search(work_dir: str, query: str) -> str:
             })
             with opener.open(req, timeout=timeout) as r:
                 data = json.loads(r.read().decode("utf-8", errors="ignore"))
-            results = []
-            for item in (data.get("results", []) or [])[:max_results]:
-                title = item.get("title", "")
-                url = item.get("url", "")
-                content = item.get("content", "")
-                if title and url:
-                    results.append(f"[{len(results)+1}] {title}\n    URL: {url}")
-                    if content:
-                        results.append(f"    {content[:200]}")
-            if results:
-                return f"搜索 \"{query}\" via Tavily ({len(results)} 条):\n\n" + "\n\n".join(results)
+            for item in (data.get("results", []) or [])[:n * 2]:
+                raw_results.append({
+                    "title": item.get("title", ""),
+                    "url": item.get("url", ""),
+                    "snippet": item.get("content", ""),
+                })
+            engine_used = "Tavily"
         except Exception:
             pass
 
     # ── SerpAPI (Google) ──
-    if provider == "serpapi" and cfg.get("serpapi_api_key"):
+    if not raw_results and provider == "serpapi" and cfg.get("serpapi_api_key"):
         try:
-            api_url = f"https://serpapi.com/search?q={encoded}&api_key={cfg['serpapi_api_key']}&num={max_results}&engine=google"
+            api_url = f"https://serpapi.com/search?q={encoded}&api_key={cfg['serpapi_api_key']}&num={n*2}&engine=google"
             req = urllib.request.Request(api_url, headers={
                 "User-Agent": "Mozilla/5.0 (compatible; CortexAgent/1.0)",
                 "Accept": "application/json",
             })
             with opener.open(req, timeout=timeout) as r:
                 data = json.loads(r.read().decode("utf-8", errors="ignore"))
-            results = []
-            for item in (data.get("organic_results", []) or [])[:max_results]:
-                title = item.get("title", "")
-                url = item.get("link", "")
-                snippet = item.get("snippet", "")
-                if title and url:
-                    results.append(f"[{len(results)+1}] {title}\n    URL: {url}")
-                    if snippet:
-                        results.append(f"    {snippet[:200]}")
-            if results:
-                return f"搜索 \"{query}\" via SerpAPI ({len(results)} 条):\n\n" + "\n\n".join(results)
+            for item in (data.get("organic_results", []) or [])[:n * 2]:
+                raw_results.append({
+                    "title": item.get("title", ""),
+                    "url": item.get("link", ""),
+                    "snippet": item.get("snippet", ""),
+                })
+            engine_used = "SerpAPI"
         except Exception:
             pass
 
-    # ── DuckDuckGo (免费默认 / fallback) ──
-    # Strategy 1: DuckDuckGo Instant Answer API (JSON)
-    try:
-        api_url = f"https://api.duckduckgo.com/?q={encoded}&format=json&no_html=1&skip_disambig=1"
-        req = urllib.request.Request(api_url, headers={
-            "User-Agent": "Mozilla/5.0 (compatible; CortexAgent/1.0)",
-            "Accept": "application/json",
-        })
-        with opener.open(req, timeout=8) as r:
-            data = json.loads(r.read().decode("utf-8", errors="ignore"))
-        results = []
-        if data.get("AbstractText", "").strip():
-            results.append(f"📖 {data['AbstractText'][:300]}\n    URL: {data.get('AbstractURL', '')}")
-        for i, t in enumerate(data.get("RelatedTopics", [])[:max_results]):
-            if t.get("Text") and t.get("FirstURL"):
-                results.append(f"[{i + 1}] {t['Text'][:120]}\n    URL: {t['FirstURL']}")
-        if results:
-            return f"搜索 \"{query}\" ({len(results)} 条):\n\n" + "\n\n".join(results)
-    except Exception:
-        pass
+    # ── DuckDuckGo Instant Answer API (JSON — 最快) ──
+    if not raw_results:
+        try:
+            api_url = f"https://api.duckduckgo.com/?q={encoded}&format=json&no_html=1&skip_disambig=1"
+            req = urllib.request.Request(api_url, headers={
+                "User-Agent": "Mozilla/5.0 (compatible; CortexAgent/1.0)",
+                "Accept": "application/json",
+            })
+            with opener.open(req, timeout=8) as r:
+                data = json.loads(r.read().decode("utf-8", errors="ignore"))
+            if data.get("AbstractText", "").strip():
+                raw_results.append({
+                    "title": data.get("Heading", query),
+                    "url": data.get("AbstractURL", ""),
+                    "snippet": data["AbstractText"][:300],
+                })
+            for t in data.get("RelatedTopics", []):
+                if t.get("Text") and t.get("FirstURL"):
+                    raw_results.append({
+                        "title": t["Text"][:120],
+                        "url": t["FirstURL"],
+                        "snippet": t.get("Text", ""),
+                    })
+            engine_used = "DuckDuckGo"
+        except Exception:
+            pass
 
-    # Strategy 2: DuckDuckGo Lite (HTML scraping — fallback)
-    try:
-        url = "https://lite.duckduckgo.com/lite/"
-        body = urllib.parse.urlencode({"q": query}).encode()
-        req = urllib.request.Request(url, data=body, headers={
-            "User-Agent": "Mozilla/5.0 (compatible; CortexAgent/1.0)",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Accept": "text/html",
-        })
-        with opener.open(req, timeout=8) as r:
-            html = r.read().decode("utf-8", errors="ignore")
-        results = []
-        for m in re.finditer(
-            r'<a[^>]*rel=["\']nofollow["\'][^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
-            html, re.I
-        ):
-            u, title = m.group(1), re.sub(r'<[^>]+>', '', m.group(2)).strip()
-            if not title or "duckduckgo.com" in u:
-                continue
-            sm = re.search(
-                r'<span[^>]*class=["\']snippet["\'][^>]*>(.*?)</span>',
-                html[m.end():m.end() + 2000], re.I | re.S
-            )
-            snippet = re.sub(r'<[^>]+>', '', sm.group(1)).strip() if sm else ""
-            results.append((title, u, snippet))
-            if len(results) >= max_results:
-                break
-        if results:
-            out = [f'搜索 "{query}" ({len(results)} 条):\n']
-            for i, (t, u, s) in enumerate(results, 1):
-                out.append(f"[{i}] {t}\n    URL: {u}")
-                if s:
-                    out.append(f"    {s[:150]}")
-                out.append("")
-            return "\n".join(out)
-    except Exception:
-        pass
+    # ── DuckDuckGo Lite (HTML scraping — fallback) ──
+    if not raw_results:
+        try:
+            url = "https://lite.duckduckgo.com/lite/"
+            body = urllib.parse.urlencode({"q": query}).encode()
+            req = urllib.request.Request(url, data=body, headers={
+                "User-Agent": "Mozilla/5.0 (compatible; CortexAgent/1.0)",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "text/html",
+            })
+            with opener.open(req, timeout=8) as r:
+                html = r.read().decode("utf-8", errors="ignore")
+            for m in re.finditer(
+                r'<a[^>]*rel=["\']nofollow["\'][^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
+                html, re.I
+            ):
+                u, title = m.group(1), re.sub(r'<[^>]+>', '', m.group(2)).strip()
+                if not title or "duckduckgo.com" in u:
+                    continue
+                sm = re.search(
+                    r'<span[^>]*class=["\']snippet["\'][^>]*>(.*?)</span>',
+                    html[m.end():m.end() + 2000], re.I | re.S
+                )
+                snippet = re.sub(r'<[^>]+>', '', sm.group(1)).strip() if sm else ""
+                raw_results.append({"title": title, "url": u, "snippet": snippet})
+            # Fallback: DDG Lite table format
+            if not raw_results:
+                for m in re.finditer(
+                    r'<td[^>]*>\s*<a[^>]*?href=["\']([^"\']+)["\'][^>]*?>(.*?)</a>',
+                    html, re.I | re.S
+                ):
+                    u, title = m.group(1), re.sub(r'<[^>]+>', '', m.group(2)).strip()
+                    if not title or "duckduckgo.com" in u or u == "/lite/":
+                        continue
+                    raw_results.append({"title": title, "url": u, "snippet": ""})
+            engine_used = "DuckDuckGo Lite"
+        except Exception:
+            pass
 
-    # ── Final fallback: Bing Web Search (HTML scraping) ──
-    try:
-        bing_url = f"https://cn.bing.com/search?q={encoded}&setlang=zh-cn"
-        req = urllib.request.Request(bing_url, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        })
-        with opener.open(req, timeout=10) as r:
-            bing_html = r.read().decode("utf-8", errors="ignore")
-        bing_results = []
-        for m in re.finditer(r'<h2[^>]*>\s*<a[^>]*?href=["\\\']([^"\\\']+)["\\\'][^>]*?>(.*?)</a>', bing_html, re.S|re.I):
-            bing_url = m.group(1)
-            bing_title = re.sub(r'<[^>]+>', '', m.group(2)).strip()
-            if not bing_title or 'bing.com' in bing_url:
-                continue
-            rest = bing_html[m.end():m.end()+2000]
-            sm = re.search(r'<p[^>]*>(.*?)</p>', rest, re.S|re.I)
-            bing_snippet = re.sub(r'<[^>]+>', '', sm.group(1)).strip() if sm else ''
-            bing_results.append((bing_title, bing_url, bing_snippet))
-            if len(bing_results) >= max_results:
-                break
-        if bing_results:
-            out = [f'搜索 "{query}" via Bing ({len(bing_results)} 条):\n']
-            for i, (t, u, s) in enumerate(bing_results, 1):
-                out.append(f"[{i}] {t[:120]}\n    URL: {u}")
-                if s:
-                    out.append(f"    {s[:150]}")
-                out.append("")
-            return "\n".join(out)
-    except Exception:
-        pass
+    # ── Bing Web Search (HTML scraping — final fallback) ──
+    if not raw_results:
+        try:
+            bing_url = f"https://cn.bing.com/search?q={encoded}&setlang=zh-cn"
+            req = urllib.request.Request(bing_url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            })
+            with opener.open(req, timeout=10) as r:
+                bing_html = r.read().decode("utf-8", errors="ignore")
+            for m in re.finditer(r'<h2[^>]*>\s*<a[^>]*?href=["\']([^"\']+)["\'][^>]*?>(.*?)</a>', bing_html, re.S|re.I):
+                b_url = m.group(1)
+                b_title = re.sub(r'<[^>]+>', '', m.group(2)).strip()
+                if not b_title or 'bing.com' in b_url:
+                    continue
+                rest = bing_html[m.end():m.end()+2000]
+                sm = re.search(r'<p[^>]*>(.*?)</p>', rest, re.S|re.I)
+                b_snippet = re.sub(r'<[^>]+>', '', sm.group(1)).strip() if sm else ''
+                raw_results.append({"title": b_title, "url": b_url, "snippet": b_snippet})
+            engine_used = "Bing"
+        except Exception:
+            pass
 
-    return f"(未找到与 \"{query}\" 相关的结果)"
+    # ── 后处理: 域名过滤 + 去重 + 截断 ──
+    filtered = [r for r in raw_results if _filter_domains(r["url"], allowed, blocked if not allowed else None)]
+    if not filtered and raw_results:
+        filtered = raw_results  # 域名过滤太严格时回退
+    filtered = _dedup_results(filtered)[:n]
+
+    if not filtered:
+        return (f"(未找到与 \"{query}\" 相关的结果。建议:\n"
+                f"  1. 使用更通用的搜索词\n"
+                f"  2. 在 settings.json 中配置 web_search.provider 为 brave/serpapi/tavily\n"
+                f"  3. 检查网络连接)")
+
+    output = _format_search_results(query, engine_used, filtered)
+
+    # ── 写入缓存 ──
+    if len(_search_cache) >= _SEARCH_CACHE_MAX:
+        _search_cache.clear()
+    _search_cache[cache_key] = output
+
+    return output
 
 
 def _load_web_search_config() -> dict:
@@ -437,46 +519,125 @@ def _load_web_search_config() -> dict:
         return {}
 
 
+# ── 网页抓取缓存 ──
+_fetch_cache: dict = {}
+_FETCH_CACHE_MAX = 20
+_FETCH_CACHE_TTL = 300  # 5 分钟
+
+
+def _extract_page_metadata(html: str) -> dict:
+    """从 HTML 中提取页面元数据 (title, description, og 标签)。"""
+    meta = {"title": "", "description": ""}
+    m = re.search(r'<title[^>]*>(.*?)</title>', html, re.S | re.I)
+    if m:
+        meta["title"] = re.sub(r'<[^>]+>', '', m.group(1)).strip()[:200]
+    m = re.search(r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']*)["\']', html, re.I)
+    if m:
+        meta["description"] = m.group(1).strip()[:300]
+    m = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']*)["\']', html, re.I)
+    if m and not meta["title"]:
+        meta["title"] = m.group(1).strip()[:200]
+    return meta
+
+
+def _html_to_readable(html: str) -> str:
+    """增强版 HTML→文本：去除导航/页脚/广告等模板内容，保留正文。"""
+    # 移除 script/style/nav/footer/aside/header 标签及内容
+    for tag in ['script', 'style', 'nav', 'footer', 'aside', 'header', 'noscript', 'iframe', 'svg']:
+        html = re.sub(rf'<{tag}[^>]*>.*?</{tag}>', '', html, flags=re.S | re.I)
+    # 移除常见广告/模板 class
+    html = re.sub(r'<div[^>]*class=["\'][^"\']*(?:ad|banner|cookie|sidebar|menu|navigation|comment|share|social|related|recommend)[^"\']*["\'][^>]*>.*?</div>', '', html, flags=re.S | re.I)
+    # HTML → 文本
+    html = re.sub(r'</?(div|p|h[1-6]|li|tr|br|article|section|blockquote|pre|code)[^>]*>', '\n', html, flags=re.I)
+    html = re.sub(r'<[^>]+>', ' ', html)
+    for e, c in [('&amp;', '&'), ('&lt;', '<'), ('&gt;', '>'), ('&quot;', '"'), ('&#39;', "'"), ('&#x27;', "'"), ('&nbsp;', ' '), ('&ensp;', ' '), ('&mdash;', '—'), ('&hellip;', '…')]:
+        html = html.replace(e, c)
+    html = re.sub(r'[ \t]+', ' ', html)
+    html = re.sub(r'\n{3,}', '\n\n', html)
+    # 移除连续空行和行首尾空格
+    lines = [line.strip() for line in html.split('\n') if line.strip()]
+    return '\n'.join(lines)
+
+
 @registry.register(
     "抓取网页全文并提取可读文本。适合读取 web_search 找到的具体页面。\n"
-    "用法: web_fetch(url=\"https://docs.python.org/3/whatsnew/3.13.html\")",
+    "参数:\n"
+    "  url       目标网址 (必填，须以 http:// 或 https:// 开头)\n"
+    "  max_chars 最大返回字符数 (可选，默认 4000，最大 20000)\n"
+    "用法: web_fetch(url=\"https://docs.python.org/3/whatsnew/3.13.html\")\n"
+    "      web_fetch(url=\"https://long-article.com\", max_chars=8000)",
     risk=RiskLevel.SAFE, capability=Capability.NET_HTTP)
-def web_fetch(work_dir: str, url: str) -> str:
+def web_fetch(work_dir: str, url: str, max_chars: int = 0) -> str:
     if not re.match(r'^https?://', url):
         return "(x) URL 须以 http:// 或 https:// 开头"
     ok, reason = check_ssrf(url)
     if not ok:
         return f"(x) {reason}"
+
+    limit = min(int(max_chars) if max_chars and int(max_chars) > 0 else 4000, 20000)
+
+    # ── 检查缓存 ──
+    import time as _time
+    cache_key = f"{url}|{limit}"
+    if cache_key in _fetch_cache:
+        cached_time, cached_text = _fetch_cache[cache_key]
+        if _time.time() - cached_time < _FETCH_CACHE_TTL:
+            return cached_text + "\n[缓存命中]"
+
     opener = _build_opener()
     try:
         req = urllib.request.Request(url, headers={
-            "User-Agent": "Mozilla/5.0 (compatible; CortexAgent/1.0)",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "text/html,application/json,text/plain,*/*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         })
-        with opener.open(req, timeout=10) as r:
-            raw = r.read(51200)
+        with opener.open(req, timeout=15) as r:
+            raw = r.read(102400)  # 读取最多 100KB
             ct = r.headers.get("Content-Type", "")
-        # Determine encoding
+            status = r.status
+
+        # ── 根据内容类型处理 ──
         if "text/html" in ct:
             try:
-                text = raw.decode("utf-8", errors="ignore")
+                html = raw.decode("utf-8", errors="ignore")
             except Exception:
-                text = raw.decode("latin-1", errors="ignore")
-            text = _html_to_text(text)
-        elif any(t in ct for t in ["text/plain", "application/json", "text/csv"]):
-            try:
-                text = raw.decode("utf-8", errors="ignore")
-            except Exception:
-                text = raw.decode("latin-1", errors="ignore")
+                html = raw.decode("latin-1", errors="ignore")
+            meta = _extract_page_metadata(html)
+            text = _html_to_readable(html)
+            # 构建带元数据的输出
+            header_parts = [f"--- {url} ---"]
+            if meta["title"]:
+                header_parts.append(f"标题: {meta['title']}")
+            if meta["description"]:
+                header_parts.append(f"摘要: {meta['description']}")
+            header = "\n".join(header_parts) + "\n\n"
+        elif any(t in ct for t in ["text/plain", "application/json", "text/csv", "application/xml"]):
+            text = raw.decode("utf-8", errors="ignore")
+            header = f"--- {url} ---\n[Content-Type: {ct}]\n\n"
         else:
             return f"(x) 不支持的内容类型: {ct}"
-        if len(text) > 4000:
-            text = text[:4000] + f"\n\n[... 已截断，原文 {len(text)} 字符]"
-        return f"--- {url} ---\n{text}" if text.strip() else "(无有效文本)"
+
+        if not text.strip():
+            return f"--- {url} ---\n(无有效文本)"
+
+        # ── 智能截断: 保留开头和结尾 ──
+        if len(text) > limit:
+            keep_head = int(limit * 0.8)
+            keep_tail = int(limit * 0.15)
+            text = text[:keep_head] + f"\n\n[... 已截断，原文 {len(text)} 字符 ...]\n\n" + text[-keep_tail:]
+
+        result = header + text
+
+        # ── 写入缓存 ──
+        if len(_fetch_cache) >= _FETCH_CACHE_MAX:
+            _fetch_cache.clear()
+        _fetch_cache[cache_key] = (_time.time(), result)
+
+        return result
     except urllib.error.HTTPError as e:
-        return f"(x) HTTP {e.code}"
+        return f"(x) HTTP {e.code} — {url}"
     except urllib.error.URLError as e:
-        return f"(x) 连接失败: {e.reason}"
+        return f"(x) 连接失败: {e.reason} — {url}"
     except Exception as e:
         return f"(x) {e}"
 

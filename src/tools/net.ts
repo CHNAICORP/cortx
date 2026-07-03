@@ -1,21 +1,21 @@
 /**
  * 网络工具 — web_search + web_fetch (node:https 支持代理)
  *
- * 设计参照 Claude Code:
- *   WebSearch → 找页面 (标题+URL+摘要)
- *   WebFetch  → 读内容 (HTML→文本，截断至 8KB)
+ * 设计参照 Claude Code 的 WebSearch / WebFetch:
+ *   web_search → 找页面 (标题+URL+摘要)，支持域名过滤、结果去重
+ *   web_fetch  → 读内容 (HTML→可读文本)，支持截断控制、元数据提取
  *
- * 多引擎 fallback (由 settings.json 中 web_search.provider 决定):
- *   duckduckgo → DuckDuckGo API → DuckDuckGo Lite (免费, 默认)
- *   brave      → Brave Search API (付费, 更高精准度)
- *   serpapi    → SerpAPI / Google (付费, 结果最丰富)
- *   tavily     → Tavily Search API (付费, AI 优化摘要)
+ * Harness Agent 设计哲学:
+ *   1. 工具即原语 — 搜索和抓取职责分离，LLM 自主决定何时用哪个
+ *   2. LLM 可控 — 关键参数暴露给 LLM (allowed_domains, max_chars 等)
+ *   3. 优雅降级 — 多引擎 fallback 链，每步失败有清晰日志
+ *   4. 结构化输出 — 结果格式统一，便于 LLM 推理
+ *   5. 可观测性 — 每条结果标注来源引擎
  */
 import { registry } from '../core/registry.js';
 import { RiskLevel, Capability } from '../core/types.js';
 import * as https from "node:https";
 import * as http from "node:http";
-import * as dns from "node:dns";
 
 // ── SSRF 防护 (内网 CIDR 黑名单) ──
 const SSRF_BLOCKED_NETS = [
@@ -24,9 +24,7 @@ const SSRF_BLOCKED_NETS = [
 ];
 
 function isPrivateHost(hostname: string): boolean {
-  // IPv6 loopback / link-local
   if (hostname === "::1" || hostname === "localhost" || hostname.startsWith("fe80:")) return true;
-  // IPv4-mapped IPv6
   const v4m = hostname.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
   if (v4m) hostname = v4m[1];
   for (const net of SSRF_BLOCKED_NETS) {
@@ -38,23 +36,19 @@ function isPrivateHost(hostname: string): boolean {
 function httpRequest(url: string, method = 'GET', body?: string, timeout = 10000, extraHeaders: Record<string, string> = {}): Promise<string> {
   return new Promise((resolve, reject) => {
     const reqUrl = new URL(url);
-
-    // SSRF 防护
     if (isPrivateHost(reqUrl.hostname)) {
       return reject(new Error(`SSRF 防护: 禁止访问内网地址 ${reqUrl.hostname}`));
     }
-
     const proxy = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy;
     let hostname = reqUrl.hostname;
     let port = reqUrl.port || (reqUrl.protocol === 'https:' ? 443 : 80);
     let path = reqUrl.pathname + reqUrl.search;
-    // 如果有代理，通过代理连接
     if (proxy) {
       try {
         const pu = new URL(proxy);
         hostname = pu.hostname;
         port = parseInt(pu.port) || (pu.protocol === 'https:' ? 443 : 80);
-        path = url; // 完整 URL 作为 path
+        path = url;
       } catch { /* 代理 URL 解析失败，直连 */ }
     }
     const mod = (proxy ? http : (reqUrl.protocol === 'https:' ? https : http));
@@ -62,10 +56,10 @@ function httpRequest(url: string, method = 'GET', body?: string, timeout = 10000
       hostname, port, path, method, timeout,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Host': reqUrl.hostname,  // 重要：保留原始 Host
+        'Host': reqUrl.hostname,
         'Accept': 'text/html,application/json,*/*',
         'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-        ...extraHeaders, // Merge extra headers (e.g., API keys)
+        ...extraHeaders,
       } as Record<string, string>,
     };
     if (body) {
@@ -77,7 +71,6 @@ function httpRequest(url: string, method = 'GET', body?: string, timeout = 10000
       };
     }
     const req = mod.request(options, (res) => {
-      // 跟随重定向 (同 host) — check SSRF on redirect too
       if ([301, 302, 307, 308].includes(res.statusCode || 0) && res.headers.location) {
         const loc = res.headers.location;
         try {
@@ -93,40 +86,90 @@ function httpRequest(url: string, method = 'GET', body?: string, timeout = 10000
         } catch { /* 继续 */ }
       }
       const chunks: Buffer[] = [];
-      res.on('data', (chunk: Buffer) => chunks.push(chunk));
-      res.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
+      res.on("end", () => resolve(Buffer.concat(chunks).toString('utf-8')));
     });
-    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-    req.on('error', reject);
+    req.on("timeout", () => { req.destroy(); reject(new Error('timeout')); });
+    req.on("error", reject);
     if (body) req.write(body);
     req.end();
   });
 }
 
-// ── HTML → 可读文本 ──
-function htmlToText(html: string): string {
-  let text = html
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/?(div|p|h[1-6]|li|tr|article|section|header|footer)[^>]*>/gi, "\n")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, " ")
-    .replace(/&ensp;/g, " ").replace(/&#0183;/g, " • ")
-    .replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
-  return text;
+// ── 域名过滤 ──
+function filterDomains(url: string, allowed?: string[], blocked?: string[]): boolean {
+  try {
+    const host = (new URL(url).hostname || "").toLowerCase();
+    if (blocked) {
+      for (const d of blocked) {
+        if (host === d.toLowerCase() || host.endsWith("." + d.toLowerCase())) return false;
+      }
+    }
+    if (allowed && allowed.length > 0) {
+      for (const d of allowed) {
+        if (host === d.toLowerCase() || host.endsWith("." + d.toLowerCase())) return true;
+      }
+      return false;
+    }
+    return true;
+  } catch { return true; }
 }
+
+// ── 结果去重 ──
+function dedupResults(results: SearchItem[]): SearchItem[] {
+  const seen = new Set<string>();
+  const deduped: SearchItem[] = [];
+  for (const item of results) {
+    try {
+      const p = new URL(item.url);
+      const key = (p.hostname || "").toLowerCase() + (p.pathname || "").replace(/\/$/, "").toLowerCase();
+    } catch { /* skip */ }
+    const key = item.url.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      deduped.push(item);
+    }
+  }
+  return deduped;
+}
+
+// ── 搜索结果类型 ──
+interface SearchItem { title: string; url: string; snippet: string }
+
+// ── 格式化搜索结果 ──
+function formatSearchResults(query: string, engine: string, results: SearchItem[]): string {
+  if (!results.length) return "";
+  const out: string[] = [`搜索 "${query}" via ${engine} (${results.length} 条):\n`];
+  results.forEach((r, i) => {
+    out.push(`  [${i + 1}] ${r.title.slice(0, 120)}`);
+    out.push(`      🔗 ${r.url}`);
+    if (r.snippet) out.push(`      ${r.snippet.slice(0, 200)}`);
+    out.push("");
+  });
+  return out.join("\n");
+}
+
+// ── 搜索缓存 ──
+const _searchCache = new Map<string, string>();
+const SEARCH_CACHE_MAX = 50;
 
 // ── 联网搜索 (多引擎) ──
 registry.register(
   "联网搜索网页 — 返回标题、URL 和摘要。找到页面后可用 web_fetch 读取全文。\n"
-    + "支持搜索引擎: duckduckgo(免费默认) | brave | serpapi | tavily。在 settings.json 中配置 web_search.provider 和对应 API key。",
+    + "参数:\n"
+    + "  query           搜索关键词 (必填)\n"
+    + "  allowed_domains 限定搜索域名，逗号分隔 (可选，如 'github.com,stackoverflow.com')\n"
+    + "  max_results     最大结果数 (可选，默认 5)\n"
+    + "用法: web_search(query=\"Python 3.13 新特性\")\n"
+    + "      web_search(query=\"React hooks\", allowed_domains=\"reactjs.org,github.com\")",
   RiskLevel.SAFE, Capability.NET_SEARCH,
-  { workDir: "string", query: "string" },
+  { workDir: "string", query: "string", allowed_domains: "string", max_results: "integer" },
   async function web_search(_workDir: string, args: Record<string, unknown>): Promise<string> {
     const query = String(args["query"]);
     const encoded = encodeURIComponent(query);
+    const allowedDomainsStr = String(args["allowed_domains"] || "");
+    const allowed = allowedDomainsStr ? allowedDomainsStr.split(",").map(d => d.trim()).filter(Boolean) : undefined;
+    const maxResultsArg = Number(args["max_results"] || 0);
 
     // 从 settings.json 读取搜索配置
     let wsCfg: Record<string, unknown> = {};
@@ -135,200 +178,161 @@ registry.register(
       wsCfg = (loadSettings().web_search as Record<string, unknown>) || {};
     } catch { /* use defaults */ }
     const provider = String(wsCfg.provider || "duckduckgo");
-    const maxResults = Number(wsCfg.max_results || 5);
+    const n = maxResultsArg > 0 ? maxResultsArg : Number(wsCfg.max_results || 5);
     const timeout = Number(wsCfg.timeout || 10) * 1000;
+    const blocked = ["bing.com", "duckduckgo.com", "google.com", "baidu.com", "csdn.net"];
+
+    // ── 检查缓存 ──
+    const cacheKey = `${query}|${allowed?.join(",") || ""}|${n}`;
+    if (_searchCache.has(cacheKey)) {
+      return _searchCache.get(cacheKey)! + "\n[缓存命中]";
+    }
+
+    let rawResults: SearchItem[] = [];
+    let engineUsed = "";
 
     // ── Brave Search API ──
     if (provider === "brave" && wsCfg.brave_api_key) {
       try {
-        const apiUrl = `https://api.search.brave.com/res/v1/web/search?q=${encoded}&count=${maxResults}`;
+        const apiUrl = `https://api.search.brave.com/res/v1/web/search?q=${encoded}&count=${n * 2}`;
         const data = await apiGet(apiUrl, {
           "X-Subscription-Token": String(wsCfg.brave_api_key),
           "Accept-Encoding": "gzip",
         }, timeout);
         const json = JSON.parse(data);
-        const results: string[] = [];
-        for (const item of ((json.web?.results || []) as Array<Record<string, string>>).slice(0, maxResults)) {
+        for (const item of ((json.web?.results || []) as Array<Record<string, string>>).slice(0, n * 2)) {
           if (item.title && item.url) {
-            results.push(`[${results.length + 1}] ${item.title}\n    URL: ${item.url}`);
-            if (item.description) results.push(`    ${item.description.slice(0, 200)}`);
+            rawResults.push({ title: item.title, url: item.url, snippet: item.description || "" });
           }
         }
-        if (results.length > 0) return `搜索 "${query}" via Brave (${results.length} 条):\n\n${results.join("\n\n")}`;
+        engineUsed = "Brave";
       } catch { /* fall through */ }
     }
 
     // ── Tavily Search API ──
-    if (provider === "tavily" && wsCfg.tavily_api_key) {
+    if (!rawResults.length && provider === "tavily" && wsCfg.tavily_api_key) {
       try {
         const apiUrl = "https://api.tavily.com/search";
         const body = JSON.stringify({
-          api_key: String(wsCfg.tavily_api_key), query, max_results: maxResults, search_depth: "basic",
+          api_key: String(wsCfg.tavily_api_key), query, max_results: n * 2, search_depth: "basic",
         });
         const data = await apiPost(apiUrl, body, timeout);
         const json = JSON.parse(data);
-        const results: string[] = [];
-        for (const item of ((json.results || []) as Array<Record<string, string>>).slice(0, maxResults)) {
+        for (const item of ((json.results || []) as Array<Record<string, string>>).slice(0, n * 2)) {
           if (item.title && item.url) {
-            results.push(`[${results.length + 1}] ${item.title}\n    URL: ${item.url}`);
-            if (item.content) results.push(`    ${item.content.slice(0, 200)}`);
+            rawResults.push({ title: item.title, url: item.url, snippet: item.content || "" });
           }
         }
-        if (results.length > 0) return `搜索 "${query}" via Tavily (${results.length} 条):\n\n${results.join("\n\n")}`;
+        engineUsed = "Tavily";
       } catch { /* fall through */ }
     }
 
     // ── SerpAPI (Google) ──
-    if (provider === "serpapi" && wsCfg.serpapi_api_key) {
+    if (!rawResults.length && provider === "serpapi" && wsCfg.serpapi_api_key) {
       try {
-        const apiUrl = `https://serpapi.com/search?q=${encoded}&api_key=${wsCfg.serpapi_api_key}&num=${maxResults}&engine=google`;
+        const apiUrl = `https://serpapi.com/search?q=${encoded}&api_key=${wsCfg.serpapi_api_key}&num=${n * 2}&engine=google`;
         const data = await httpRequest(apiUrl, 'GET', undefined, timeout);
         const json = JSON.parse(data);
-        const results: string[] = [];
-        for (const item of ((json.organic_results || []) as Array<Record<string, string>>).slice(0, maxResults)) {
-          const title = item.title, url = item.link;
-          if (title && url) {
-            results.push(`[${results.length + 1}] ${title}\n    URL: ${url}`);
-            if (item.snippet) results.push(`    ${item.snippet.slice(0, 200)}`);
+        for (const item of ((json.organic_results || []) as Array<Record<string, string>>).slice(0, n * 2)) {
+          if (item.title && item.link) {
+            rawResults.push({ title: item.title, url: item.link, snippet: item.snippet || "" });
           }
         }
-        if (results.length > 0) return `搜索 "${query}" via SerpAPI (${results.length} 条):\n\n${results.join("\n\n")}`;
+        engineUsed = "SerpAPI";
       } catch { /* fall through */ }
     }
 
-    // ── DuckDuckGo (免费默认 / fallback) ──
-    // Strategy 1: DuckDuckGo Instant Answer API (JSON — 最快)
-    try {
-      const html = await httpRequest(
-        `https://api.duckduckgo.com/?q=${encoded}&format=json&no_html=1&skip_disambig=1`,
-        'GET', undefined, 8000
-      );
-      const data = JSON.parse(html);
-      const results: string[] = [];
-
-      // Abstract (definition/instant answer)
-      if (data.AbstractText && data.AbstractText.trim()) {
-        results.push(`📖 ${data.AbstractText.slice(0, 300)}\n    URL: ${data.AbstractURL || ''}`);
-      }
-
-      // Related topics
-      const topics = data.RelatedTopics || [];
-      for (let i = 0; i < Math.min(topics.length, maxResults); i++) {
-        const t = topics[i];
-        if (t.Text && t.FirstURL) {
-          results.push(`[${i + 1}] ${t.Text.slice(0, 120)}\n    URL: ${t.FirstURL}`);
-        }
-      }
-
-      if (results.length > 0) {
-        return `搜索 "${query}" (${results.length} 条):\n\n${results.join("\n\n")}`;
-      }
-    } catch {
-      // API failed → fall through to Lite HTML
-    }
-
-    // Strategy 2: DuckDuckGo Lite (HTML scraping — fallback)
-    try {
-      const body = new URLSearchParams({ q: query }).toString();
-      const html = await httpRequest('https://lite.duckduckgo.com/lite/', 'POST', body, 8000);
-      const results: string[] = [];
-
-      // DDG Lite uses various link patterns — try multiple
-      let linkRe = /<a[^>]*?rel=["']nofollow["'][^>]*?href=["']([^"']+)["'][^>]*?>(.*?)<\/a>/gi;
-      let match;
-      while ((match = linkRe.exec(html)) !== null) {
-        const u = match[1], title = match[2].replace(/<[^>]+>/g, '').trim();
-        if (!title || u.includes('duckduckgo.com')) continue;
-        const restIdx = match.index + match[0].length;
-        const snippetM = /<span[^>]*?class=["']snippet["'][^>]*?>(.*?)<\/span>/i.exec(
-          html.slice(restIdx, restIdx + 2000)
+    // ── DuckDuckGo Instant Answer API (JSON — 最快) ──
+    if (!rawResults.length) {
+      try {
+        const html = await httpRequest(
+          `https://api.duckduckgo.com/?q=${encoded}&format=json&no_html=1&skip_disambig=1`,
+          'GET', undefined, 8000
         );
-        const snippet = snippetM ? snippetM[1].replace(/<[^>]+>/g, '').trim() : '';
-        results.push(`[${results.length + 1}] ${title.slice(0, 120)}\n    URL: ${u}${snippet ? `\n    ${snippet.slice(0, 150)}` : ''}`);
-        if (results.length >= maxResults) break;
-      }
-
-      // Fallback: DDG Lite simple table format <td><a href="...">title</a></td>
-      if (results.length === 0) {
-        const tdRe = /<td[^>]*>\s*<a[^>]*?href=["']([^"']+)["'][^>]*?>(.*?)<\/a>\s*(.*?)<\/td>/gi;
-        while ((match = tdRe.exec(html)) !== null) {
-          const u = match[1], title = match[2].replace(/<[^>]+>/g, '').trim(), snippet = match[3].replace(/<[^>]+>/g, '').trim();
-          if (!title || u.includes('duckduckgo.com') || u === '/lite/' || u === '/') continue;
-          results.push(`[${results.length + 1}] ${title.slice(0, 120)}\n    URL: ${u}${snippet ? `\n    ${snippet.slice(0, 150)}` : ''}`);
-          if (results.length >= maxResults) break;
+        const data = JSON.parse(html);
+        if (data.AbstractText && data.AbstractText.trim()) {
+          rawResults.push({ title: data.Heading || query, url: data.AbstractURL || "", snippet: data.AbstractText.slice(0, 300) });
         }
-      }
+        for (const t of (data.RelatedTopics || [])) {
+          if (t.Text && t.FirstURL) {
+            rawResults.push({ title: t.Text.slice(0, 120), url: t.FirstURL, snippet: t.Text || "" });
+          }
+        }
+        engineUsed = "DuckDuckGo";
+      } catch { /* fall through */ }
+    }
 
-      // Fallback: any <a href="http..."> in table rows
-      if (results.length === 0) {
-        const aRe = /<a[^>]*?href=["'](https?:\/\/[^"']+)["'][^>]*?>(.*?)<\/a>/gi;
-        while ((match = aRe.exec(html)) !== null) {
+    // ── DuckDuckGo Lite (HTML scraping — fallback) ──
+    if (!rawResults.length) {
+      try {
+        const body = new URLSearchParams({ q: query }).toString();
+        const html = await httpRequest('https://lite.duckduckgo.com/lite/', 'POST', body, 8000);
+        // DDG Lite: nofollow links
+        let linkRe = /<a[^>]*?rel=["']nofollow["'][^>]*?href=["']([^"']+)["'][^>]*?>(.*?)<\/a>/gi;
+        let match: RegExpExecArray | null;
+        while ((match = linkRe.exec(html)) !== null) {
           const u = match[1], title = match[2].replace(/<[^>]+>/g, '').trim();
-          if (!title || u.includes('duckduckgo.com') || u === 'https://lite.duckduckgo.com/lite/') continue;
-          results.push(`[${results.length + 1}] ${title.slice(0, 120)}\n    URL: ${u}`);
-          if (results.length >= maxResults) break;
+          if (!title || u.includes('duckduckgo.com')) continue;
+          const restIdx = match.index + match[0].length;
+          const snippetM = /<span[^>]*?class=["']snippet["'][^>]*?>(.*?)<\/span>/i.exec(html.slice(restIdx, restIdx + 2000));
+          const snippet = snippetM ? snippetM[1].replace(/<[^>]+>/g, '').trim() : '';
+          rawResults.push({ title, url: u, snippet });
         }
-      }
-
-      if (results.length > 0) {
-        return `搜索 "${query}" (${results.length} 条):\n\n${results.join("\n\n")}`;
-      }
-    } catch {
-      // Both strategies failed
+        // Fallback: DDG Lite table format
+        if (!rawResults.length) {
+          const tdRe = /<td[^>]*>\s*<a[^>]*?href=["']([^"']+)["'][^>]*?>(.*?)<\/a>/gi;
+          while ((match = tdRe.exec(html)) !== null) {
+            const u = match[1], title = match[2].replace(/<[^>]+>/g, '').trim();
+            if (!title || u.includes('duckduckgo.com') || u === '/lite/') continue;
+            rawResults.push({ title, url: u, snippet: "" });
+          }
+        }
+        engineUsed = "DuckDuckGo Lite";
+      } catch { /* fall through */ }
     }
 
-    // ── Bing Web Search (final fallback via HTML scraping) ──
-    try {
-      const bingUrl = `https://cn.bing.com/search?q=${encoded}&setlang=zh-cn`;
-      const html = await httpRequest(bingUrl, 'GET', undefined, timeout);
-      const results: string[] = [];
-
-      // Bing: <h2><a href="...">title</a></h2> + <p>snippet</p>
-      const h2Re = /<h2[^>]*>\s*<a[^>]*?href=["']([^"']+)["'][^>]*?>(.*?)<\/a>\s*<\/h2>/gi;
-      let match: RegExpExecArray | null;
-      while ((match = h2Re.exec(html)) !== null) {
-        const u = match[1], title = match[2].replace(/<[^>]+>/g, '').trim().replace(/&amp;/g, '&');
-        if (!title || u.includes('bing.com')) continue;
-        // Look for snippet <p> after this h2
-        const restIdx = match.index + match[0].length;
-        const snippetM = /<p[^>]*>(.*?)<\/p>/i.exec(html.slice(restIdx, restIdx + 2000));
-        const snippet = snippetM ? snippetM[1].replace(/<[^>]+>/g, '').trim().replace(/&ensp;/g, ' ').replace(/&#0183;/g, ' • ') : '';
-        results.push(`[${results.length + 1}] ${title.slice(0, 120)}\n    URL: ${u}${snippet ? `\n    ${snippet.slice(0, 150)}` : ''}`);
-        if (results.length >= maxResults) break;
-      }
-
-      if (results.length > 0) {
-        return `搜索 "${query}" via Bing (${results.length} 条):\n\n${results.join("\n\n")}`;
-      }
-
-      // Fallback: Bing <li class="b_algo"> or cite/url patterns
-      const citeRe = /<cite[^>]*>(.*?)<\/cite>/gi;
-      const urls = new Set<string>();
-      while ((match = citeRe.exec(html)) !== null) {
-        const u = match[1].replace(/<[^>]+>/g, '').trim().replace(/&amp;/g, '&');
-        if (u && u.startsWith('http') && !u.includes('bing.com')) urls.add(u);
-      }
-      if (urls.size > 0) {
-        for (const u of urls) {
-          results.push(`[-] ${u}`);
-          if (results.length >= maxResults) break;
+    // ── Bing Web Search (HTML scraping — final fallback) ──
+    if (!rawResults.length) {
+      try {
+        const bingUrl = `https://cn.bing.com/search?q=${encoded}&setlang=zh-cn`;
+        const html = await httpRequest(bingUrl, 'GET', undefined, timeout);
+        const h2Re = /<h2[^>]*>\s*<a[^>]*?href=["']([^"']+)["'][^>]*?>(.*?)<\/a>\s*<\/h2>/gi;
+        let match: RegExpExecArray | null;
+        while ((match = h2Re.exec(html)) !== null) {
+          const u = match[1], title = match[2].replace(/<[^>]+>/g, '').trim().replace(/&amp;/g, '&');
+          if (!title || u.includes('bing.com')) continue;
+          const restIdx = match.index + match[0].length;
+          const snippetM = /<p[^>]*>(.*?)<\/p>/i.exec(html.slice(restIdx, restIdx + 2000));
+          const snippet = snippetM ? snippetM[1].replace(/<[^>]+>/g, '').trim().replace(/&ensp;/g, ' ').replace(/&#0183;/g, ' • ') : '';
+          rawResults.push({ title, url: u, snippet });
         }
-        if (results.length > 0) {
-          return `搜索 "${query}" via Bing (URLs only, ${results.length} 条):\n\n${results.join("\n\n")}`;
-        }
-      }
-    } catch {
-      // All search strategies failed
+        engineUsed = "Bing";
+      } catch { /* all search strategies failed */ }
     }
 
-    return `(未找到与 "${query}" 相关的结果。请尝试:\n`
-      + `1. 使用更通用的搜索词\n`
-      + `2. 在 settings.json 中配置 web_search.provider 为 brave/serpapi/tavily 并填入 API key\n`
-      + `3. 检查网络连接是否正常)`;
+    // ── 后处理: 域名过滤 + 去重 + 截断 ──
+    let filtered = rawResults.filter(r => filterDomains(r.url, allowed, allowed ? undefined : blocked));
+    if (!filtered.length && rawResults.length) filtered = rawResults;
+    filtered = dedupResults(filtered).slice(0, n);
+
+    if (!filtered.length) {
+      return `(未找到与 "${query}" 相关的结果。请尝试:\n`
+        + `1. 使用更通用的搜索词\n`
+        + `2. 在 settings.json 中配置 web_search.provider 为 brave/serpapi/tavily 并填入 API key\n`
+        + `3. 检查网络连接是否正常)`;
+    }
+
+    const output = formatSearchResults(query, engineUsed, filtered);
+
+    // ── 写入缓存 ──
+    if (_searchCache.size >= SEARCH_CACHE_MAX) _searchCache.clear();
+    _searchCache.set(cacheKey, output);
+
+    return output;
   },
 );
 
-// ── API helpers (with proper headers) ──
+// ── API helpers ──
 async function apiGet(url: string, extraHeaders: Record<string, string>, timeout: number): Promise<string> {
   return httpRequest(url, 'GET', undefined, timeout, extraHeaders);
 }
@@ -337,27 +341,105 @@ async function apiPost(url: string, body: string, timeout: number): Promise<stri
   return httpRequest(url, 'POST', body, timeout);
 }
 
+// ── 增强版 HTML → 可读文本 ──
+function htmlToReadable(html: string): string {
+  // 移除 script/style/nav/footer/aside/header 标签及内容
+  for (const tag of ['script', 'style', 'nav', 'footer', 'aside', 'header', 'noscript', 'iframe', 'svg']) {
+    html = html.replace(new RegExp(`<${tag}[^>]*>[\\s\\S]*?</${tag}>`, 'gi'), '');
+  }
+  // 移除常见广告/模板 class
+  html = html.replace(/<div[^>]*class=["'][^"']*(?:ad|banner|cookie|sidebar|menu|navigation|comment|share|social|related|recommend)[^"']*["'][^>]*>[\s\S]*?<\/div>/gi, '');
+  // HTML → 文本
+  let text = html
+    .replace(/<\/?(div|p|h[1-6]|li|tr|br|article|section|blockquote|pre|code)[^>]*>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, " ")
+    .replace(/&ensp;/g, " ").replace(/&mdash;/g, "—").replace(/&hellip;/g, "…");
+  text = text.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n");
+  // 移除空行和行首尾空格
+  const lines = text.split("\n").map(l => l.trim()).filter(l => l);
+  return lines.join("\n");
+}
+
+// ── 提取页面元数据 ──
+function extractPageMetadata(html: string): { title: string; description: string } {
+  const meta = { title: "", description: "" };
+  const titleM = html.match(/<title[^>]*>(.*?)<\/title>/is);
+  if (titleM) meta.title = titleM[1].replace(/<[^>]+>/g, '').trim().slice(0, 200);
+  const descM = html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)["']/i);
+  if (descM) meta.description = descM[1].trim().slice(0, 300);
+  const ogM = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']*)["']/i);
+  if (ogM && !meta.title) meta.title = ogM[1].trim().slice(0, 200);
+  return meta;
+}
+
+// ── 网页抓取缓存 ──
+const _fetchCache = new Map<string, [number, string]>();
+const FETCH_CACHE_MAX = 20;
+const FETCH_CACHE_TTL = 300000; // 5 分钟
+
 // ── 抓取网页全文 ──
 registry.register(
-  "抓取网页全文并提取可读文本。适合读取 web_search 找到的具体页面。",
+  "抓取网页全文并提取可读文本。适合读取 web_search 找到的具体页面。\n"
+    + "参数:\n"
+    + "  url       目标网址 (必填，须以 http:// 或 https:// 开头)\n"
+    + "  max_chars 最大返回字符数 (可选，默认 4000，最大 20000)\n"
+    + "用法: web_fetch(url=\"https://docs.python.org/3/whatsnew/3.13.html\")\n"
+    + "      web_fetch(url=\"https://long-article.com\", max_chars=8000)",
   RiskLevel.SAFE, Capability.NET_HTTP,
-  { workDir: "string", url: "string" },
+  { workDir: "string", url: "string", max_chars: "integer" },
   async function web_fetch(_wd: string, args: Record<string, unknown>): Promise<string> {
     const url = String(args["url"]);
     if (!/^https?:\/\//i.test(url)) return "(x) URL 须以 http:// 或 https:// 开头";
+    const maxCharsArg = Number(args["max_chars"] || 0);
+    const limit = Math.min(maxCharsArg > 0 ? maxCharsArg : 4000, 20000);
+
+    // ── 检查缓存 ──
+    const cacheKey = `${url}|${limit}`;
+    const cached = _fetchCache.get(cacheKey);
+    if (cached && Date.now() - cached[0] < FETCH_CACHE_TTL) {
+      return cached[1] + "\n[缓存命中]";
+    }
+
     try {
-      const html = await httpRequest(url, 'GET', undefined, 10000);
-      let text = htmlToText(html);
-      // Compress aggressively: remove repeated whitespace and boilerplate
-      text = text
-        .replace(/\n{2,}/g, "\n\n")  // collapse multiple blank lines
-        .replace(/[ \t]{2,}/g, " "); // collapse multiple spaces
-      // Trim to 2KB to prevent context explosion from multiple fetches
-      if (text.length > 2000) text = text.slice(0, 2000) + `\n\n[...已截断，原文 ${text.length} 字符]`;
-      return `--- ${url} ---\n${text || "(无有效文本)"}`;
+      const html = await httpRequest(url, 'GET', undefined, 15000);
+      const ct = html.startsWith("{") ? "application/json" : "text/html"; // 简化判断
+
+      let text: string;
+      let header: string;
+
+      if (ct === "text/html" || /<html|<!doctype/i.test(html)) {
+        const meta = extractPageMetadata(html);
+        text = htmlToReadable(html);
+        const headerParts = [`--- ${url} ---`];
+        if (meta.title) headerParts.push(`标题: ${meta.title}`);
+        if (meta.description) headerParts.push(`摘要: ${meta.description}`);
+        header = headerParts.join("\n") + "\n\n";
+      } else {
+        text = html;
+        header = `--- ${url} ---\n[Content-Type: ${ct}]\n\n`;
+      }
+
+      if (!text.trim()) return `--- ${url} ---\n(无有效文本)`;
+
+      // ── 智能截断: 保留开头和结尾 ──
+      if (text.length > limit) {
+        const keepHead = Math.floor(limit * 0.8);
+        const keepTail = Math.floor(limit * 0.15);
+        text = text.slice(0, keepHead) + `\n\n[... 已截断，原文 ${text.length} 字符 ...]\n\n` + text.slice(-keepTail);
+      }
+
+      const result = header + text;
+
+      // ── 写入缓存 ──
+      if (_fetchCache.size >= FETCH_CACHE_MAX) _fetchCache.clear();
+      _fetchCache.set(cacheKey, [Date.now(), result]);
+
+      return result;
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      return `(x) 抓取失败: ${msg}`;
+      return `(x) 抓取失败: ${msg} — ${url}`;
     }
   },
 );

@@ -220,6 +220,10 @@ export class LLMProvider {
     return { text, toolCalls, reasoning };
   }
 
+  switch(alias: string): void {
+    this.model = resolveModel(alias);
+  }
+
   static resolve = resolveModel;
   static setupProviders = setupProviders;
 }

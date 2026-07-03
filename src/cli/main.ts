@@ -34,6 +34,9 @@ Cortex Agent — Harness Agent 架构 + Agentic Loop 引擎
   ctx --no-stream            关闭流式输出
   ctx --new-session          强制新会话
   ctx --mode yolo            全部放行模式
+  ctx --list-sessions        列出已保存会话
+  ctx --resume <SESSION_ID>  恢复到指定会话
+  ctx --init-config           创建默认 .cortx/settings.json
 `;
 
 async function main(): Promise<void> {
@@ -53,11 +56,8 @@ async function main(): Promise<void> {
   if (args.includes("--update")) {
     const pkg = require("../../package.json");
     console.log(`当前: cortx ${pkg.version} (TypeScript)`);
-    // 使用 npm-check-updates 或直接安装；Windows 上 npm config 的缓存可能导致 404
-    // 显式指定版本防止 @latest 缓存过期
-    const { execSync, exec } = require("child_process");
+    const { execSync } = require("child_process");
     try {
-      // 方案1: 先获取最新版本，再安装
       const latest = execSync("npm view @chnaicorp/cortx version", { encoding: "utf-8", timeout: 10000 }).trim();
       if (latest && latest !== pkg.version) {
         console.log(`可用版本: ${latest}，正在更新...`);
@@ -68,10 +68,24 @@ async function main(): Promise<void> {
         execSync("npm install -g @chnaicorp/cortx@latest --force", { stdio: "inherit" });
       }
     } catch (e) {
-      // 回退: npm update
       console.error(`更新失败: ${e}`);
       execSync("npm update -g @chnaicorp/cortx", { stdio: "inherit" });
     }
+    return;
+  }
+
+  if (args.includes("--init-config")) {
+    const cfgPath = path.join(process.cwd(), ".cortx", "settings.json");
+    const template = {
+      model: "pro", provider: "deepseek",
+      providers: { deepseek: { api_key: "", base_url: "https://api.deepseek.com/v1", models: { flash: "deepseek-v4-flash", pro: "deepseek-v4-pro" } } },
+      web_search: { provider: "duckduckgo", brave_api_key: "", serpapi_api_key: "", tavily_api_key: "", max_results: 5, timeout: 10 },
+      max_steps: 10, context_limit: 1000000, permission_mode: "standard",
+      auto_extract_memory: true, memory_enabled: true, sessions_enabled: true,
+    };
+    fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+    fs.writeFileSync(cfgPath, JSON.stringify(template, null, 2), "utf-8");
+    console.log(`已创建默认配置: ${cfgPath}`);
     return;
   }
 
@@ -86,7 +100,6 @@ async function main(): Promise<void> {
       console.error("\n  ⚠️  未配置 API Key。交互模式运行 ctx 进入配置向导，或编辑 ~/.cortx/settings.json\n");
       process.exit(1);
     }
-    // Interactive setup wizard
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     const ask = (q: string): Promise<string> => new Promise(r => rl.question(q, r));
     console.log(`\n  ${"=".repeat(50)}`);
@@ -112,7 +125,6 @@ async function main(): Promise<void> {
     const mChoice = (await ask(`    请选择 (1/2): `)).trim() || "1";
     const [modelAlias, modelName] = modelsMap[mChoice] || modelsMap["1"];
     rl.close();
-    // Save
     const userPath = path.join(os.homedir(), ".cortx", "settings.json");
     const newSettings = {
       model: modelAlias, provider: prov,
@@ -123,7 +135,6 @@ async function main(): Promise<void> {
     fs.mkdirSync(path.dirname(userPath), { recursive: true });
     fs.writeFileSync(userPath, JSON.stringify(newSettings, null, 2), "utf-8");
     console.log(`\n    ✅ 配置已保存到 ${userPath}\n`);
-    // Reload settings
     Object.assign(settings, newSettings);
   }
 
@@ -135,58 +146,84 @@ async function main(): Promise<void> {
   const noStream = args.includes("--no-stream");
   const modeIdx = args.indexOf("--mode");
   const permissionMode = (modeIdx >= 0 ? args[modeIdx + 1] : settings.permission_mode || "standard") as "standard" | "auto" | "yolo";
+  const maxStepsIdx = args.indexOf("--max-steps");
+  const maxSteps = maxStepsIdx >= 0 ? parseInt(args[maxStepsIdx + 1]) || 10 : (settings.max_steps as number) || 10;
+  const workDirIdx = args.indexOf("--work-dir");
+  const workDir = workDirIdx >= 0 ? args[workDirIdx + 1] : (settings.work_dir as string) || require("../core/types.js").defaultWorkDir() as string;
 
   const agent = new CortexAgent({
     apiKey: getApiKey(settings),
     baseUrl: getBaseUrl(settings),
     model: LLMProvider.resolve(model),
-    workDir: (settings.work_dir as string) || require("../core/types.js").defaultWorkDir() as string,
+    workDir,
     permissionMode,
     contextLimit: (settings.context_limit as number) || 1_000_000,
     memoryEnabled: settings.memory_enabled !== false,
     sessionsEnabled: settings.sessions_enabled !== false,
     autoExtractMemory: settings.auto_extract_memory !== false,
+    maxSteps,
   });
 
   const term = new Terminal();
-  // 始终设置 term：_requestConfirmation 需要 term 来显示权限提示
   agent.setTerm(term);
-  // 仅在流式模式显示 banner 和流式输出
+
+  // ── List sessions ──
+  if (args.includes("--list-sessions")) {
+    // @ts-ignore — sessions is private but we need it for CLI
+    const sessions = agent.sessions;
+    if (!sessions) { console.log("(会话系统不可用)"); return; }
+    const list = sessions.listSessions();
+    if (!list.length) { console.log("(无已保存的会话)"); return; }
+    console.log(`\n${"ID".padEnd(24)} ${"Q".padEnd(5)} ${"MODEL".padEnd(22)} ${"LAST ACTIVE".padEnd(20)}`);
+    console.log("-".repeat(75));
+    for (const s of list) {
+      const sid = String(s.session_id || "").slice(0, 22);
+      const qcnt = s.query_count || 0;
+      const m = String(s.model || "").slice(0, 20);
+      const la = String(s.last_active || "").slice(0, 19);
+      console.log(`  ${sid.padEnd(22)} ${String(qcnt).padEnd(5)} ${m.padEnd(22)} ${la}`);
+    }
+    return;
+  }
+
   if (!noStream) {
     term.banner(agent.config.model, registry.schemaList.length, agent.config.workDir, agent.config.permissionMode);
   }
 
   // ── Session init ──
+  const resumeIdx = args.indexOf("--resume");
   const newSession = args.includes("--new-session");
-  agent.initSession(undefined, !newSession);  // 默认尝试恢复
+  if (resumeIdx >= 0) {
+    agent.initSession(args[resumeIdx + 1], true);
+  } else {
+    agent.initSession(undefined, !newSession);
+  }
 
   if (query) {
     const answer = await agent.run(query);
-    console.log(answer);
+    if (noStream) console.log(answer);
     const trace = agent.lastTrace;
     if (trace?.steps.length) {
       const totalMs = trace.steps.reduce((s, st) => s + st.latencyMs, 0);
       console.error(`\n[审计] ${trace.steps.length} 步, ${totalMs.toFixed(0)}ms`);
     }
-    // 单次查询退出前打印 session ID
     if (agent.sessionIdStr) {
       console.error(`[会话] ${agent.sessionIdStr}`);
     }
     return;
   }
 
-  // REPL with Shift+Tab support
+  // ── REPL ──
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  let currentLine = "";
-  
   const modeLabels: Record<string, string> = { standard: "s", auto: "a", yolo: "y" };
+
   const showPrompt = () => {
     const pct = agent.contextPct;
     const ml = modeLabels[agent.config.permissionMode] || "?";
     rl.setPrompt(`[${ml} ${pct}%]> `);
   };
 
-  // Listen for Shift+Tab (\x1b[Z) to cycle permission mode
+  // Shift+Tab to cycle permission mode
   process.stdin.on("keypress", (_str, key) => {
     if (key && key.name === "tab" && key.shift) {
       const modes = ["standard", "auto", "yolo"];
@@ -207,15 +244,166 @@ async function main(): Promise<void> {
     if (!q) { showPrompt(); rl.prompt(); continue; }
     if (["/exit", "/quit", "/q"].includes(q)) {
       agent.saveSession();
-      const sid = agent.sessionIdStr || "?";
-      console.log(`\x1b[33mBye.\x1b[0m  \x1b[90mSession: ${sid}\x1b[0m`);
+      console.log(`\x1b[33mBye.\x1b[0m  \x1b[90mSession: ${agent.sessionIdStr || "?"}\x1b[0m`);
       break;
     }
-    if (["/help", "/h"].includes(q)) { console.log(USAGE); showPrompt(); rl.prompt(); continue; }
+    if (["/help", "/h", "/?"].includes(q)) {
+      console.log(`  \x1b[36m═══ 会话管理 ═══\x1b[0m`);
+      console.log(`  \x1b[36m/save\x1b[0m           保存会话`);
+      console.log(`  \x1b[36m/sessions\x1b[0m       列出会话`);
+      console.log(`  \x1b[36m/reset\x1b[0m          重置上下文`);
+      console.log(`  \x1b[36m═══ 工具 & 模型 ═══\x1b[0m`);
+      console.log(`  \x1b[36m/tools\x1b[0m          列出工具`);
+      console.log(`  \x1b[36m/model [pro]\x1b[0m    切换模型`);
+      console.log(`  \x1b[36m/mode [s|a|y]\x1b[0m   切换权限模式`);
+      console.log(`  \x1b[36m═══ 上下文 & 记忆 ═══\x1b[0m`);
+      console.log(`  \x1b[36m/context\x1b[0m       上下文容量 + 缓存命中率`);
+      console.log(`  \x1b[36m/memory\x1b[0m        列出记忆`);
+      console.log(`  \x1b[36m/forget <name>\x1b[0m  删除记忆`);
+      console.log(`  \x1b[36m═══ 目标 & 规划 ═══\x1b[0m`);
+      console.log(`  \x1b[36m/goal [目标]\x1b[0m    设置/查看持久化目标`);
+      console.log(`  \x1b[36m/plan [描述]\x1b[0m    进入规划模式`);
+      console.log(`  \x1b[36m═══ 快捷操作 ═══\x1b[0m`);
+      console.log(`  \x1b[36m@filename\x1b[0m       引用文件内容到上下文`);
+      console.log(`  \x1b[36m/q, /exit\x1b[0m       退出`);
+      showPrompt(); rl.prompt(); continue;
+    }
+    // ── /tools ──
+    if (["/tools", "/t"].includes(q)) {
+      for (const s of registry.schemaList) {
+        const n = s.function.name; const m = registry.meta(n);
+        console.log(`  \x1b[36m${n}\x1b[0m [${m?.capability || "?"}]`);
+        console.log(`    ${s.function.description}`);
+      }
+      showPrompt(); rl.prompt(); continue;
+    }
+    // ── /model ──
+    if (q === "/model" || q === "/m") { console.log(`当前: ${agent.config.model}\n可用: flash | pro`); showPrompt(); rl.prompt(); continue; }
+    if (q.startsWith("/model ") || q.startsWith("/m ")) { agent.switchModel(q.split(" ", 2)[1]); console.log(`→ ${agent.config.model}`); showPrompt(); rl.prompt(); continue; }
+    // ── /mode ──
+    if (q === "/mode" || q === "/permissions") { console.log(`当前: ${agent.config.permissionMode}\n可用: s/standard | a/auto | y/yolo`); showPrompt(); rl.prompt(); continue; }
+    if (q.startsWith("/mode ") || q.startsWith("/permissions ")) { console.log(agent.switchPermissionMode(q.split(" ", 2)[1])); showPrompt(); rl.prompt(); continue; }
+    // ── /save ──
+    if (q === "/save" || q === "/s") { agent.saveSession(); console.log(`会话已保存: ${agent.sessionIdStr}`); showPrompt(); rl.prompt(); continue; }
+    // ── /sessions ──
+    if (q === "/sessions" || q === "/ls") {
+      // @ts-ignore
+      const sessions = agent.sessions;
+      if (!sessions) { console.log("(会话系统不可用)"); }
+      else {
+        const list = sessions.listSessions();
+        if (!list.length) { console.log("(无已保存的会话)"); }
+        else { for (const s of list) { console.log(`  ${String(s.session_id).slice(0, 22)}  Q=${s.query_count || 0}  ${String(s.last_active || "").slice(0, 19)}`); } }
+      }
+      showPrompt(); rl.prompt(); continue;
+    }
+    // ── /memory ──
+    if (q === "/memory" || q === "/mem") {
+      // @ts-ignore
+      if (!agent.memory) { console.log("(记忆系统不可用)"); }
+      else {
+        // @ts-ignore
+        const facts = agent.memory.listAll();
+        if (!facts.length) console.log("(没有记住任何事实)");
+        else for (const f of facts) console.log(`  \x1b[36m${f}\x1b[0m`);
+      }
+      showPrompt(); rl.prompt(); continue;
+    }
+    // ── /forget ──
+    if (q.startsWith("/forget ")) {
+      const name = q.split(" ", 2)[1].trim();
+      // @ts-ignore
+      if (!agent.memory) { console.log("(记忆系统不可用)"); }
+      else {
+        // @ts-ignore
+        if (agent.memory.remove(name)) console.log(`已忘记: ${name}`);
+        else console.log(`(x) 未找到: ${name}`);
+      }
+      showPrompt(); rl.prompt(); continue;
+    }
+    // ── /reset ──
+    if (q === "/reset") { agent.reset(); console.log("上下文已重置（含拒绝计数和暂停状态）"); showPrompt(); rl.prompt(); continue; }
+    // ── /context ──
+    if (q === "/context") {
+      const ctx = agent.contextTokens;
+      const lim = agent.contextLimit;
+      const pct = agent.contextPct;
+      console.log(`  ═══ 上下文容量 ═══`);
+      console.log(`  Token:   ${ctx.toLocaleString()} / ${lim.toLocaleString()}  (${pct}%)`);
+      const cs = agent.cacheStats;
+      if (cs.calls > 0) {
+        console.log(`  ═══ 缓存统计 ═══`);
+        console.log(`  API 调用: ${cs.calls} 次`);
+        console.log(`  缓存命中: ${cs.hitRate.toFixed(0)}%  (${cs.cacheHits}/${cs.calls})`);
+        console.log(`  输入 token: ${cs.totalInputTokens.toLocaleString()}`);
+      }
+      showPrompt(); rl.prompt(); continue;
+    }
+    // ── /goal ──
+    if (q === "/goal") {
+      const g = agent.goal;
+      if (g) console.log(`当前目标:\n  ${g}`);
+      else console.log("(未设置目标)\n用法: /goal <描述>  设置目标\n      /goal clear   清除目标");
+      showPrompt(); rl.prompt(); continue;
+    }
+    if (q.startsWith("/goal ")) {
+      const gtext = q.slice(6).trim();
+      if (["clear", "stop", "reset", "cancel", "none"].includes(gtext.toLowerCase())) {
+        agent.setGoal(""); console.log("目标已清除");
+      } else {
+        console.log(`目标已设置:\n  ${agent.setGoal(gtext)}`);
+      }
+      showPrompt(); rl.prompt(); continue;
+    }
+    // ── /plan ──
+    if (q.startsWith("/plan")) {
+      const planDesc = q.includes(" ") ? q.split(" ").slice(1).join(" ").trim() : "";
+      let planMsg = "[规划模式] 请先分析问题，制定详细的实施方案，不要立即编写代码。";
+      if (planDesc) planMsg += `\n\n任务: ${planDesc}`;
+      console.log(`\x1b[36m进入规划模式...\x1b[0m`);
+      try { await agent.run(planMsg); } catch (e) { console.error(`[ERROR] ${e}`); }
+      showPrompt(); rl.prompt(); continue;
+    }
+    // ── @file reference ──
+    if (q.startsWith("@")) {
+      const parts = q.slice(1).trim().split(/\s+(.*)/);
+      const fname = parts[0] || "";
+      const rest = parts[1] || "";
+      if (fname.includes("..") || fname.startsWith("/") || fname.startsWith("\\")) {
+        console.log(`(x) @引用不支持路径穿越: ${fname}`);
+        showPrompt(); rl.prompt(); continue;
+      }
+      // Simple file search in cwd
+      let match = "";
+      try {
+        const walk = (dir: string): boolean => {
+          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+            const full = path.join(dir, entry.name);
+            if (entry.isDirectory()) { if (walk(full)) return true; }
+            else if (entry.name === fname || entry.name.startsWith(fname)) { match = full; return true; }
+          }
+          return false;
+        };
+        walk(process.cwd());
+      } catch { /* ignore */ }
+      if (match) {
+        try {
+          const content = fs.readFileSync(match, "utf-8").slice(0, 3000);
+          let ctxMsg = `[文件引用: ${match}]\n\n\`\`\`\n${content}\n\`\`\``;
+          if (rest) ctxMsg += `\n\n${rest}`;
+          console.log(`\x1b[90m@${match} (${content.length} 字符)\x1b[0m`);
+          await agent.run(ctxMsg);
+        } catch (e) { console.log(`(x) 读取失败: ${e}`); }
+      } else {
+        try { await agent.run(q); } catch (e) { console.error(`[ERROR] ${e}`); }
+      }
+      showPrompt(); rl.prompt(); continue;
+    }
 
+    // ── Normal query ──
     try {
-      const answer = await agent.run(q);
-      console.log(answer);
+      await agent.run(q, undefined, true);
     } catch (e) {
       console.error(`[ERROR] ${e}`);
     }
@@ -223,8 +411,7 @@ async function main(): Promise<void> {
     rl.prompt();
   }
   agent.saveSession();
-  const sid = agent.sessionIdStr || "?";
-  console.log(`\x1b[33mBye.\x1b[0m  \x1b[90mSession: ${sid}\x1b[0m`);
+  console.log(`\x1b[33mBye.\x1b[0m  \x1b[90mSession: ${agent.sessionIdStr || "?"}\x1b[0m`);
   rl.close();
 }
 

@@ -29,7 +29,10 @@ Agentic Loop（每轮）:
 
 import os, re, sys, json, time, inspect, shlex, sqlite3, platform, datetime
 import subprocess, urllib.parse, urllib.request, urllib.error, ipaddress
-from typing import List, Dict, Callable, Optional, Any, Tuple, Set, get_type_hints
+from typing import List, Dict, Callable, Optional, Any, Tuple, Set, get_type_hints, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .terminal import Terminal
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -610,21 +613,21 @@ class CortexAgent:
         if not self.memory:
             return
         steps = self._trace.steps if self._trace else []
-        tool_names = [s.toolName for s in steps]
+        tool_names = [s.tool_name for s in steps]
         # Only auto-bookmark if no explicit remember_fact was already called
         if "remember_fact" not in tool_names:
             summary = user_query[:80].replace("\n", " ").strip()
             self.memory.append(f"查询: {summary}")
         # Auto-extract web_search result summaries into memory
         for step in steps:
-            if step.toolName == "web_search" and step.success:
-                result = step.resultPreview
+            if step.tool_name == "web_search" and step.success:
+                result = step.result_preview
                 m = re.search(r'\[1\]\s*(.*?)(?:\n|$)', result)
                 if m:
                     first_result = m.group(1).strip()[:100]
                     self.memory.append(f"搜索到: {first_result}")
-            if step.toolName == "web_fetch" and step.success and "--- " in step.resultPreview:
-                m = re.search(r'---\s*(https?://\S+)', step.resultPreview)
+            if step.tool_name == "web_fetch" and step.success and "--- " in step.result_preview:
+                m = re.search(r'---\s*(https?://\S+)', step.result_preview)
                 if m:
                     self.memory.append(f"抓取: {m.group(1)}")
 
@@ -702,7 +705,11 @@ class CortexAgent:
             if result is not None: return result
             self._last_reasoning = None
         trace.step_limit_reached = True
-        return "[超步数] 未能完成"
+        msg = "[超步数] 未能完成"
+        if self._term:
+            self._term._w(f"\n{msg}\n")
+            return ""
+        return msg
 
     def _reflect(self, trace, step_no, max_steps) -> Optional[str]:
         """结构性收敛：仅在达到最大步数时给予一次最终回答机会。"""
@@ -710,8 +717,20 @@ class CortexAgent:
             final, tcs = self._think()
             if final:
                 trace.final_answer = final
-                return final if not tcs else final + "\n\n[已达最大步数，工具调用未执行]"
-            return "[达到最大步数]"
+                if tcs:
+                    # Text was streamed, but the suffix is not — print to terminal
+                    if self._term:
+                        self._term._w("\n\n[已达最大步数，工具调用未执行]")
+                        return ""
+                    return final + "\n\n[已达最大步数，工具调用未执行]"
+                # Text was already streamed — return "" for terminal mode
+                return "" if self._term else final
+            # LLM failed (API error after retries) — display fallback to terminal
+            fallback = "[达到最大步数]"
+            if self._term:
+                self._term._w(f"\n{fallback}\n")
+                return ""
+            return fallback
         return None
 
     def _think(self) -> Tuple[Optional[str], Optional[List[Dict]]]:

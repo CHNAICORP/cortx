@@ -59,7 +59,11 @@ registry.register(
   RiskLevel.SAFE, Capability.FS_READ,
   { workDir: "string" },
   function get_current_time(_workDir: string): string {
-    return new Date().toISOString();
+    const now = new Date();
+    const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    const weekNum = Math.ceil(((now.getTime() - new Date(now.getFullYear(), 0, 1).getTime()) / 86400000 + new Date(now.getFullYear(), 0, 1).getDay() + 1) / 7);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())} ${days[now.getDay()]} (week ${String(weekNum).padStart(2, "0")})`;
   },
 );
 
@@ -125,8 +129,37 @@ registry.register("正则搜索文件内容", RiskLevel.SAFE, Capability.FS_READ
   { workDir: "string", pattern: "string", dirPath: "string", globFilter: "string", head: "number" },
   function grep(workDir: string, args: Record<string, unknown>): string {
     const pattern = String(args["pattern"]); const dirPath = String(args["dirPath"] || ".");
-    try { new RegExp(pattern); } catch { return "(x) 正则错误"; }
-    return "(grep 结果)";
+    const globFilter = String(args["globFilter"] || ""); const head = Number(args["head"] || 50);
+    let regex: RegExp;
+    try { regex = new RegExp(pattern); } catch { return "(x) 正则错误"; }
+    const base = path.resolve(path.isAbsolute(dirPath) ? dirPath : path.join(workDir, dirPath));
+    if (!fs.existsSync(base)) return `(x) 路径不存在: ${dirPath}`;
+    const results: string[] = [];
+    const search = (p: string) => {
+      const stat = fs.statSync(p);
+      if (stat.isFile()) {
+        try {
+          const lines = fs.readFileSync(p, "utf-8").split("\n");
+          for (let i = 0; i < lines.length; i++) {
+            if (regex.test(lines[i])) {
+              results.push(`${p}:${i + 1}: ${lines[i].replace(/\s+$/, "").slice(0, 200)}`);
+              if (results.length >= head) return;
+            }
+          }
+        } catch { /* skip unreadable */ }
+      } else if (stat.isDirectory()) {
+        try {
+          for (const entry of fs.readdirSync(p, { withFileTypes: true })) {
+            if (results.length >= head) return;
+            if (globFilter && !entry.name.match(globFilter)) continue;
+            search(path.join(p, entry.name));
+          }
+        } catch { /* skip unreadable dirs */ }
+      }
+    };
+    search(base);
+    if (!results.length) return `(未找到匹配 '${pattern}' 的结果)`;
+    return `(${results.length} 条)\n` + results.join("\n");
   },
 );
 
@@ -136,15 +169,32 @@ registry.register("文件差异对比", RiskLevel.SAFE, Capability.FS_READ,
     const a = String(args["fileA"]); const b = String(args["fileB"]);
     const pa = path.resolve(path.isAbsolute(a) ? a : path.join(workDir, a));
     const pb = path.resolve(path.isAbsolute(b) ? b : path.join(workDir, b));
-    if (!fs.existsSync(pa) || !fs.existsSync(pb)) return "(x) 文件不存在";
+    if (!fs.existsSync(pa)) return `(x) 文件不存在: ${a}`;
+    if (!fs.existsSync(pb)) return `(x) 文件不存在: ${b}`;
     const ca = fs.readFileSync(pa, "utf-8").split("\n");
     const cb = fs.readFileSync(pb, "utf-8").split("\n");
+    // Unified diff (LCS-based, matching Python difflib.unified_diff output)
     const diff: string[] = [];
-    const maxLen = Math.max(ca.length, cb.length);
-    for (let i = 0; i < maxLen; i++) {
-      if (ca[i] !== cb[i]) diff.push(`${i+1}: - ${ca[i] || ""}\n${i+1}: + ${cb[i] || ""}`);
+    const n = ca.length, m = cb.length;
+    // Build LCS table
+    const dp: number[][] = Array(n + 1).fill(0).map(() => Array(m + 1).fill(0));
+    for (let i = n - 1; i >= 0; i--) {
+      for (let j = m - 1; j >= 0; j--) {
+        dp[i][j] = ca[i] === cb[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      }
     }
-    return diff.length ? diff.join("\n") : "(文件完全相同)";
+    // Backtrack to produce diff
+    let i = 0, j = 0;
+    while (i < n && j < m) {
+      if (ca[i] === cb[j]) { i++; j++; }
+      else if (dp[i + 1][j] >= dp[i][j + 1]) { diff.push(`- ${ca[i]}`); i++; }
+      else { diff.push(`+ ${cb[j]}`); j++; }
+    }
+    while (i < n) { diff.push(`- ${ca[i]}`); i++; }
+    while (j < m) { diff.push(`+ ${cb[j]}`); j++; }
+    if (!diff.length) return "(文件完全相同)";
+    const header = `--- ${a}\n+++ ${b}\n`;
+    return header + diff.slice(0, 80).join("\n");
   },
 );
 
@@ -156,9 +206,20 @@ registry.register("文件操作 cp/mv/rm/mkdir", RiskLevel.WRITE, Capability.FS_
     const sp = path.resolve(path.isAbsolute(src) ? src : path.join(workDir, src));
     if (op === "mkdir") { fs.mkdirSync(sp, { recursive: true }); return `已创建目录 ${src}`; }
     if (!fs.existsSync(sp)) return `(x) 源不存在: ${src}`;
-    if (op === "cp") { fs.cpSync(sp, path.resolve(path.isAbsolute(tgt) ? tgt : path.join(workDir, tgt)), { recursive: true }); return `已复制`; }
-    if (op === "rm") { fs.rmSync(sp, { recursive: true }); return `已删除`; }
-    return `(x) 不支持: ${op}`;
+    if (op === "cp") { fs.cpSync(sp, path.resolve(path.isAbsolute(tgt) ? tgt : path.join(workDir, tgt)), { recursive: true }); return `已复制 ${src} → ${tgt}`; }
+    if (op === "mv") {
+      const dp = path.resolve(path.isAbsolute(tgt) ? tgt : path.join(workDir, tgt));
+      const parent = path.dirname(dp);
+      if (parent) fs.mkdirSync(parent, { recursive: true });
+      fs.renameSync(sp, dp);
+      return `已移动 ${src} → ${tgt}`;
+    }
+    if (op === "rm") {
+      const workRoot = path.resolve(workDir);
+      if (sp === workRoot) return "(x) 禁止删除工作目录根目录";
+      fs.rmSync(sp, { recursive: true }); return `已删除 ${src}`;
+    }
+    return `(x) 不支持: ${op} (可用: cp, mv, rm, mkdir)`;
   },
 );
 
@@ -175,8 +236,68 @@ registry.register("CSV文件查询", RiskLevel.SAFE, Capability.FS_READ,
   { workDir: "string", filePath: "string", query: "string" },
   function csv_query(workDir: string, args: Record<string, unknown>): string {
     const p = String(args["filePath"]); const d = path.resolve(path.isAbsolute(p) ? p : path.join(workDir, p));
+    const query = String(args["query"] || "SELECT * LIMIT 50");
     if (!fs.existsSync(d)) return `(x) 文件不存在: ${p}`;
-    return fs.readFileSync(d, "utf-8").slice(0, 2000);
+    try {
+      const raw = fs.readFileSync(d, "utf-8").trim();
+      const lines = raw.split("\n");
+      if (!lines.length) return "(空CSV)";
+      const cols = lines[0].split(",").map((c: string) => c.trim());
+      const rows: Record<string, string>[] = [];
+      for (let i = 1; i < lines.length; i++) {
+        const vals = lines[i].split(",");
+        const row: Record<string, string> = {};
+        cols.forEach((c: string, ci: number) => { row[c] = (vals[ci] || "").trim(); });
+        rows.push(row);
+      }
+      if (!rows.length) return "(空CSV)";
+      // Simple SQL: SELECT col1,col2 WHERE col=val ORDER BY col LIMIT n
+      const q = query.toUpperCase().replace("SELECT ", "").trim();
+      let selected = cols;
+      let whereClause: string | null = null;
+      let orderBy: string | null = null;
+      let limit = 50;
+      let working = q;
+      if (working.includes(" WHERE ")) {
+        const parts = working.split(" WHERE ", 2);
+        working = parts[0]; let rest = parts[1];
+        if (rest.includes(" ORDER BY ")) {
+          const obParts = rest.split(" ORDER BY ", 2);
+          whereClause = obParts[0].trim(); orderBy = obParts[1].trim();
+          if (orderBy.includes(" LIMIT ")) {
+            const limParts = orderBy.split(" LIMIT ", 2);
+            orderBy = limParts[0].trim(); limit = parseInt(limParts[1]) || 50;
+          }
+        } else if (rest.includes(" LIMIT ")) {
+          const limParts = rest.split(" LIMIT ", 2);
+          whereClause = limParts[0].trim(); limit = parseInt(limParts[1]) || 50;
+        } else { whereClause = rest.trim(); }
+      } else if (working.includes(" LIMIT ")) {
+        const limParts = working.split(" LIMIT ", 2);
+        working = limParts[0]; limit = parseInt(limParts[1]) || 50;
+      }
+      if (working && working !== "*") selected = working.split(",").map((c: string) => c.trim());
+      let filtered = rows;
+      if (whereClause) {
+        const m = whereClause.match(/(\w+)\s*=\s*(.+)/);
+        if (m) {
+          const col = m[1], val = m[2].trim().replace(/^["']/, "").replace(/["']$/, "");
+          filtered = filtered.filter((r: Record<string, string>) => r[col] === val);
+        }
+      }
+      if (orderBy) {
+        const desc = orderBy.endsWith(" DESC");
+        const col = orderBy.replace(" DESC", "").replace(" ASC", "").trim();
+        filtered.sort((a: Record<string, string>, b: Record<string, string>) => {
+          const av = a[col] || "", bv = b[col] || "";
+          return desc ? bv.localeCompare(av) : av.localeCompare(bv);
+        });
+      }
+      filtered = filtered.slice(0, limit);
+      const outLines = [selected.join(" | "), "-".repeat(selected.join(" | ").length)];
+      for (const r of filtered) outLines.push(selected.map((c: string) => r[c] || "").join(" | "));
+      return `(${filtered.length} 行)\n` + outLines.join("\n");
+    } catch (e) { return `(x) ${e}`; }
   },
 );
 
