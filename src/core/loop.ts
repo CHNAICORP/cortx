@@ -620,14 +620,12 @@ export class CortexAgent {
     text: string | null; toolCalls: ParsedToolCall[] | null; reasoning: string;
   }> {
     /**
-     * Think 阶段 — 调用 LLM，带空响应自适应恢复。
+     * Think 阶段 — 调用 LLM，带渐进降级恢复。
      *
-     * 恢复策略（按根因分层）:
-     *   1. finishReason="length" → 推理吃光了 max_tokens 预算
-     *      → 关闭 thinking 重试，将全部预算留给 content/tool_calls
-     *   2. finishReason="stop" 但空内容 → LLM 真正返回了空
-     *      → 注入 nudge 消息强制生成回答
-     *   3. API 异常 → 常规重试
+     * 3 级降级策略（每级改变策略，不做无意义重试）:
+     *   Level 1: thinking=true  — 正常推理模式
+     *   Level 2: thinking=false — 关闭推理，全部 token 留给 content/tool_calls
+     *   Level 3: thinking=false + nudge — 注入提示消息强制生成回答
      */
 
     const doCall = async (thinking: boolean = true) => {
@@ -641,56 +639,36 @@ export class CortexAgent {
       return this.llm.call(this.ctx, thinking);
     };
 
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const { text, toolCalls, reasoning, finishReason } = await doCall(true);
-
-        // ── 正常响应 ──
-        if (text || toolCalls) {
-          return { text, toolCalls, reasoning };
-        }
-
-        // ── 空响应: 根据 finishReason 分层恢复 ──
-        if (finishReason === "length") {
-          // 推理吃光了 max_tokens → 关闭 thinking 重试
-          if (attempt < 2) {
-            await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
-            continue;
-          }
-          // 最终尝试: 关闭 thinking + 注入 nudge
-          const nudge: Message = { role: "user", content: "请根据以上工具返回的信息，直接给出你的回答。" };
-          this.ctx.push(nudge);
-          try {
-            const r2 = await doCall(false);
-            if (r2.text || r2.toolCalls) {
-              this.ctx.pop();
-              return { text: r2.text, toolCalls: r2.toolCalls, reasoning: r2.reasoning };
-            }
-          } catch { /* ignore */ }
-          this.ctx.pop();
-          return { text: null, toolCalls: null, reasoning: "" };
-        }
-
-        // finishReason="stop" 或空 → LLM 真正返回了空内容 → 注入 nudge
-        if (attempt < 2) {
-          await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
-          continue;
-        }
-        const nudge: Message = { role: "user", content: "请根据以上工具返回的信息，直接给出你的回答。" };
-        this.ctx.push(nudge);
-        try {
-          const r2 = await doCall(false);
-          if (r2.text || r2.toolCalls) {
-            this.ctx.pop();
-            return { text: r2.text, toolCalls: r2.toolCalls, reasoning: r2.reasoning };
-          }
-        } catch { /* ignore */ }
-        this.ctx.pop();
-        return { text: null, toolCalls: null, reasoning: "" };
-      } catch (e) {
-        if (attempt < 2) await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+    // ── Level 1: 正常推理模式 ──
+    try {
+      const { text, toolCalls, reasoning } = await doCall(true);
+      if (text || toolCalls) {
+        return { text, toolCalls, reasoning };
       }
-    }
+    } catch { /* fall through */ }
+
+    // ── Level 2: 关闭推理模式（解决 finishReason=length） ──
+    await new Promise(r => setTimeout(r, 500));
+    try {
+      const { text, toolCalls } = await doCall(false);
+      if (text || toolCalls) {
+        return { text, toolCalls, reasoning: "" };
+      }
+    } catch { /* fall through */ }
+
+    // ── Level 3: 关闭推理 + 注入 nudge ──
+    await new Promise(r => setTimeout(r, 500));
+    const nudge: Message = { role: "user", content: "请根据以上工具返回的信息，直接给出你的回答。" };
+    this.ctx.push(nudge);
+    try {
+      const { text, toolCalls, reasoning } = await doCall(false);
+      this.ctx.pop();
+      if (text || toolCalls) {
+        return { text, toolCalls, reasoning };
+      }
+    } catch { /* ignore */ }
+    this.ctx.pop();
+
     return { text: null, toolCalls: null, reasoning: "" };
   }
 }

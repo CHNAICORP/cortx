@@ -740,19 +740,16 @@ class CortexAgent:
         return None
 
     def _think(self) -> Tuple[Optional[str], Optional[List[Dict]]]:
-        """Think 阶段 — 调用 LLM，带空响应自适应恢复。
+        """Think 阶段 — 调用 LLM，带渐进降级恢复。
 
-        恢复策略（按根因分层）:
-          1. finish_reason="length" → 推理吃光了 max_tokens 预算
-             → 关闭 thinking 重试，将全部预算留给 content/tool_calls
-          2. finish_reason="stop" 但空内容 → LLM 真正返回了空
-             → 注入 nudge 消息强制生成回答
-          3. API 异常 → 常规重试
+        3 级降级策略（每级改变策略，不做无意义重试）:
+          Level 1: thinking=True  — 正常推理模式
+          Level 2: thinking=False — 关闭推理，全部 token 留给 content/tool_calls
+          Level 3: thinking=False + nudge — 注入提示消息强制生成回答
         """
         term = self._term
 
         def _do_call(thinking: bool = True):
-            """封装 LLM 调用，返回 (text, tcs, reasoning, finish_reason)。"""
             if term:
                 return self.llm.call_stream(
                     self._ctx,
@@ -763,66 +760,40 @@ class CortexAgent:
             else:
                 return self.llm.call(self._ctx, thinking=thinking)
 
-        for attempt in range(3):
-            try:
-                text, tcs, reasoning, finish_reason = _do_call(thinking=True)
-                if reasoning: self._last_reasoning = reasoning
+        # ── Level 1: 正常推理模式 ──
+        try:
+            text, tcs, reasoning, finish_reason = _do_call(thinking=True)
+            if reasoning: self._last_reasoning = reasoning
+            if text or tcs:
+                return text, tcs
+        except Exception:
+            pass
 
-                # ── 正常响应 ──
-                if text or tcs:
-                    return text, tcs
+        # ── Level 2: 关闭推理模式（解决 finish_reason=length） ──
+        time.sleep(0.5)
+        try:
+            text, tcs, reasoning, finish_reason = _do_call(thinking=False)
+            if text or tcs:
+                return text, tcs
+        except Exception:
+            pass
 
-                # ── 空响应: 根据 finish_reason 分层恢复 ──
-                if finish_reason == "length":
-                    # 推理吃光了 max_tokens → 关闭 thinking 重试
-                    # 全部 8192 token 预算留给 content/tool_calls
-                    if attempt < 2:
-                        time.sleep(0.5 * (attempt + 1))
-                        continue
-                    # 最终尝试: 关闭 thinking + 注入 nudge
-                    nudge = {"role": "user",
-                             "content": "请根据以上工具返回的信息，直接给出你的回答。"}
-                    self._ctx.append(nudge)
-                    try:
-                        text, tcs, reasoning, _ = _do_call(thinking=False)
-                        if reasoning: self._last_reasoning = reasoning
-                    except Exception:
-                        pass
-                    finally:
-                        if self._ctx and self._ctx[-1] is nudge:
-                            self._ctx.pop()
-                    if text or tcs:
-                        return text, tcs
-                    return None, None
+        # ── Level 3: 关闭推理 + 注入 nudge ──
+        time.sleep(0.5)
+        nudge = {"role": "user",
+                 "content": "请根据以上工具返回的信息，直接给出你的回答。"}
+        self._ctx.append(nudge)
+        try:
+            text, tcs, reasoning, _ = _do_call(thinking=False)
+            if reasoning: self._last_reasoning = reasoning
+        except Exception:
+            text, tcs = None, None
+        finally:
+            if self._ctx and self._ctx[-1] is nudge:
+                self._ctx.pop()
+        if text or tcs:
+            return text, tcs
 
-                elif finish_reason == "stop" or not finish_reason:
-                    # LLM 真正返回了空内容 → 注入 nudge
-                    if attempt < 2:
-                        time.sleep(0.5 * (attempt + 1))
-                        continue
-                    nudge = {"role": "user",
-                             "content": "请根据以上工具返回的信息，直接给出你的回答。"}
-                    self._ctx.append(nudge)
-                    try:
-                        text, tcs, reasoning, _ = _do_call(thinking=False)
-                        if reasoning: self._last_reasoning = reasoning
-                    except Exception:
-                        pass
-                    finally:
-                        if self._ctx and self._ctx[-1] is nudge:
-                            self._ctx.pop()
-                    if text or tcs:
-                        return text, tcs
-                    return None, None
-
-                # 未知 finish_reason → 常规重试
-                if attempt < 2:
-                    time.sleep(0.5 * (attempt + 1))
-                    continue
-                return None, None
-
-            except Exception as e:
-                if attempt < 2: time.sleep(0.5 * (attempt + 1))
         return None, None
 
     def _tool_labeled(self):
