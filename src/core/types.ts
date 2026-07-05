@@ -163,7 +163,7 @@ export const DEFAULT_CONFIG: AgentConfig = {
   model: "deepseek-v4-flash",
   workDir: defaultWorkDir(),
   maxSteps: 0,               // 0=unlimited (24h continuous operation)
-  toolTimeout: 0,            // 0=no timeout (long builds/tests/browser)
+  toolTimeout: 30,           // Default 30s tool execution timeout (prevents blocking commands)
   systemPrompt: "",
   maxContextMsgs: 50,
   loopTimeout: 0,            // 0=no timeout (24h continuous operation)

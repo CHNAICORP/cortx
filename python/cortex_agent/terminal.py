@@ -170,6 +170,14 @@ class Terminal:
         else:
             self._w(f" {icon} {self.GRAY}[{latency_ms:.0f}ms]{self.RESET}\n")
 
+    def tool_heartbeat(self, elapsed_seconds: int):
+        """显示工具执行心跳（每 5 秒更新一次）"""
+        self._w(f"  {self.GRAY}⏳ {elapsed_seconds}s...{self.RESET}\n")
+
+    def tool_interrupted(self):
+        """显示工具被用户中断"""
+        self._w(f"  {self.YELLOW}⚠ 用户中断 (Ctrl+C){self.RESET}\n")
+
     # ── Banner ──
 
     # 权限模式元数据

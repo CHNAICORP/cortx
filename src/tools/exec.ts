@@ -11,14 +11,29 @@ registry.register("执行系统命令", RiskLevel.SYSTEM, Capability.SHELL,
   { workDir: "string", command: "string" },
   function run_shell_command(workDir: string, args: Record<string, unknown>): string {
     const cmd = String(args["command"]);
+    // ── 阻塞命令检测 ──
+    const blockingPatterns = [
+      /\b(npm\s+start|npm\s+run\s+dev|npm\s+run\s+serve)\b/i,
+      /\b(node\s+server|python\s+-m\s+http\.server|php\s+-S)\b/i,
+      /\b(git\s+daemon|serve|run\s+server)\b/i,
+      /\b(npx\s+.*serve|npx\s+.*start)\b/i,
+    ];
+    for (const pattern of blockingPatterns) {
+      if (pattern.test(cmd)) {
+        return `(x) 检测到阻塞命令: '${cmd}'\n该命令会启动长期运行的进程（如服务器），无法在工具执行超时内完成。\n\n建议:\n  1. 使用后台运行模式（如 npm start &）\n  2. 使用专门的验证工具检查服务是否正常`;
+      }
+    }
     const isWin = process.platform === "win32";
     try {
       const result = isWin
         ? spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", cmd],
-            { cwd: workDir, timeout: 0, encoding: "utf-8" })
+            { cwd: workDir, timeout: 30000, encoding: "utf-8" })
         : spawnSync("bash", ["-c", cmd],
-            { cwd: workDir, timeout: 0, encoding: "utf-8" });
+            { cwd: workDir, timeout: 30000, encoding: "utf-8" });
       const out = ((result.stdout || "") + (result.stderr || "")).trim() || "(无输出)";
+      if (result.error && (result.error as any).code === "ETIMEDOUT") {
+        return `(x) 超时（命令执行超过 30s）\n命令: ${cmd}\n\n可能的原因:\n  1. 命令是长期运行的进程（如服务器启动）\n  2. 命令陷入了死循环\n  3. 网络问题导致挂起`;
+      }
       return `exit=${result.status}\n${out}`;
     } catch (e) { return `(x) ${e}`; }
   },
@@ -34,8 +49,11 @@ registry.register("执行 Python 代码", RiskLevel.SYSTEM, Capability.PYTHON,
       const tmp = path.join(require("os").tmpdir(), `ctx_py_${Date.now()}_${rnd}.py`);
       fs.writeFileSync(tmp, code, "utf-8");
       try {
-        const result = spawnSync("python", [tmp], { timeout: 0, encoding: "utf-8" });
-        const out = ((result.stdout || "") + (result.stderr || "")).trim() || "(无输出)";
+        const result = spawnSync("python", [tmp], { timeout: 30000, encoding: "utf-8" });
+        const out = ((result.stdout || "") + (result.stderr || "")).trim().slice(0, 3000) || "(无输出)";
+        if (result.error && (result.error as any).code === "ETIMEDOUT") {
+          return `(x) 超时（Python 代码执行超过 30s）\n\n可能的原因:\n  1. 代码中有无限循环\n  2. 代码长时间等待 I/O\n  3. 代码计算量过大`;
+        }
         return `exit=${result.status}\n${out}`;
       } finally {
         // Always clean up temp file even if spawn fails

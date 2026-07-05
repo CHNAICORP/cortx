@@ -16,11 +16,30 @@ Cortex Agent 工具实现 — 所有工具注册到 registry
   子代理:   spawn_subagent
 """
 
-import os, re, sqlite3, platform, subprocess, datetime, json, csv, io
+import os, re, sqlite3, platform, subprocess, datetime, json, csv, io, threading, time
 import urllib.parse, urllib.request, urllib.error
 from .cortex_agent import registry, RiskLevel, Capability, check_ssrf
 
 _tasks = []  # 模块级简单任务存储
+
+# ── 工具超时配置（可从 AgentConfig.tool_timeout 设置）──
+_SHELL_TIMEOUT = 30  # 默认 30 秒
+_PYTHON_TIMEOUT = 30  # 默认 30 秒
+
+# 阻塞命令模式（会启动长期运行的进程）
+_BLOCKING_COMMAND_PATTERNS = [
+    r'\b(npm\s+start|npm\s+run\s+dev|npm\s+run\s+serve)\b',  # npm 启动
+    r'\b(node\s+server|python\s+-m\s+http\.server|php\s+-S)\b',  # 服务器启动
+    r'\b(git\s+daemon|serve|run\s+server)\b',  # 服务器相关
+    r'\b(npx\s+.*serve|npx\s+.*start)\b',  # npx 启动
+]
+
+def set_tool_timeout(seconds: int):
+    """设置工具执行超时（秒）。0 表示无超时。"""
+    global _SHELL_TIMEOUT, _PYTHON_TIMEOUT
+    if seconds > 0:
+        _SHELL_TIMEOUT = seconds
+        _PYTHON_TIMEOUT = seconds
 
 
 # ══════════════════════════════════════════════════════════════
@@ -165,15 +184,25 @@ def execute_sql_query(work_dir: str, sql: str) -> str:
                     risk=RiskLevel.SYSTEM, capability=Capability.SHELL)
 def run_shell_command(work_dir: str, command: str) -> str:
     os.makedirs(work_dir, exist_ok=True)
+    
+    # ── 阻塞命令检测 ──
+    for pattern in _BLOCKING_COMMAND_PATTERNS:
+        if re.search(pattern, command, re.IGNORECASE):
+            return f"(x) 检测到阻塞命令: '{command}'\n该命令会启动长期运行的进程（如服务器），无法在工具执行超时内完成。\n\n建议:\n  1. 使用后台运行模式（如 npm start &）\n  2. 使用专门的验证工具检查服务是否正常\n  3. 使用 Ctrl+C 中断当前命令"
+    
     is_win = platform.system() == "Windows"
     try:
         args = ["powershell","-NoProfile","-NonInteractive","-Command",command] if is_win else ["bash", "-c", command]
-        r = subprocess.run(args, cwd=work_dir, capture_output=True, text=True, timeout=None, shell=False,
+        timeout = _SHELL_TIMEOUT if _SHELL_TIMEOUT > 0 else None
+        r = subprocess.run(args, cwd=work_dir, capture_output=True, text=True, timeout=timeout, shell=False,
                           encoding='utf-8', errors='replace')
         out = ((r.stdout or "") + (r.stderr or "")).strip() or "(无输出)"
         return f"exit={r.returncode}\n{out}"
-    except subprocess.TimeoutExpired: return "(x) 超时"
-    except Exception as e: return f"(x) {e}"
+    except subprocess.TimeoutExpired:
+        timeout_str = f"{_SHELL_TIMEOUT}s" if _SHELL_TIMEOUT > 0 else "无限制"
+        return f"(x) 超时（命令执行超过 {timeout_str}）\n命令: {command}\n\n可能的原因:\n  1. 命令是长期运行的进程（如服务器启动）\n  2. 命令陷入了死循环\n  3. 网络问题导致挂起\n\n建议:\n  1. 检查命令是否为阻塞式启动命令\n  2. 使用 Ctrl+C 中断后重试"
+    except Exception as e:
+        return f"(x) {e}"
 
 
 @registry.register("执行 Python 代码（子进程隔离）", risk=RiskLevel.SYSTEM, capability=Capability.PYTHON)
@@ -183,12 +212,16 @@ def run_python(work_dir: str, code: str) -> str:
         tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8")
         try:
             tmp.write(code); tmp.close()
+            timeout = _PYTHON_TIMEOUT if _PYTHON_TIMEOUT > 0 else None
             r = subprocess.run([_sys.executable, tmp.name], cwd=work_dir,
-                               capture_output=True, text=True, timeout=None,
+                               capture_output=True, text=True, timeout=timeout,
                                env={**_os.environ, "PYTHONPATH": "", "PATH": _os.environ.get("PATH", "")})
             out = (r.stdout + r.stderr).strip() or "(无输出)"
             return f"exit={r.returncode}\n{out}"
         finally: _os.unlink(tmp.name)
+    except subprocess.TimeoutExpired:
+        timeout_str = f"{_PYTHON_TIMEOUT}s" if _PYTHON_TIMEOUT > 0 else "无限制"
+        return f"(x) 超时（Python 代码执行超过 {timeout_str}）\n\n可能的原因:\n  1. 代码中有无限循环\n  2. 代码长时间等待 I/O\n  3. 代码计算量过大\n\n建议:\n  1. 添加超时控制或退出条件\n  2. 使用 Ctrl+C 中断后重试"
     except Exception as e: return f"(x) Python 沙箱异常: {e}"
 
 

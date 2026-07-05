@@ -627,7 +627,7 @@ class AgentConfig:
     model: str = "deepseek-v4-flash"
     work_dir: str = field(default_factory=lambda: os.path.join(os.path.expanduser("~"), ".cortx", "workspace"))
     max_steps: int = 0               # 0=无限（不限制步数，agent 自主决定何时完成）
-    tool_timeout: int = 0            # 0=无超时（允许长时间构建/测试/浏览器操作）
+    tool_timeout: int = 30           # 工具执行超时（秒），0=无超时（默认 30s，避免阻塞命令挂起）
     system_prompt: str = ""
     max_context_msgs: int = 50
     loop_timeout: float = 0.0        # 0=无超时（支持 24h 连续运行）
@@ -682,6 +682,10 @@ class CortexAgent:
             os.makedirs(wd, exist_ok=True)
             self.config.work_dir = wd
         self.policy = PolicyEngine(wd, self.config)
+        # ── 同步 tool_timeout 到 tools.py 的模块级超时配置 ──
+        from . import tools as _tools_module
+        if self.config.tool_timeout > 0:
+            _tools_module.set_tool_timeout(self.config.tool_timeout)
         self.executor = ToolExecutor(registry, wd, self.config.tool_timeout,
                                       max_result_chars=self.config.max_result_chars)
         # ── Runtime state (工作区 = 运行时产物) ──
@@ -1278,7 +1282,8 @@ class CortexAgent:
                                 self._term.code_stream(file_path, content)
                         # WARN tier: execute but annotate
                         warn_msg = reason[len(PolicyEngine.WARN_PREFIX):]
-                        result = self.executor.execute(name, args)
+                        # ── 工具执行：心跳 + Ctrl+C 中断支持 ──
+                        result = self._execute_with_heartbeat(name, args)
                         result = f"[注意: {warn_msg}]\n{result}"
                         # ── PostToolUse 钩子 ──
                         post_hook = self._hooks.run_post_tool_use(
@@ -1299,7 +1304,8 @@ class CortexAgent:
                             file_path = args.get("path") or args.get("filePath") or args.get("file_path") or ""
                             if content and len(content) >= 30:
                                 self._term.code_stream(file_path, content)
-                        result = self.executor.execute(name, args)
+                        # ── 工具执行：心跳 + Ctrl+C 中断支持 ──
+                        result = self._execute_with_heartbeat(name, args)
                         # ── PostToolUse 钩子 ──
                         post_hook = self._hooks.run_post_tool_use(
                             HookContext(name, args, self.config.work_dir, result))
@@ -1334,6 +1340,34 @@ class CortexAgent:
             self._term._w(f"\n{msg}\n")
             return ""
         return msg
+
+    def _execute_with_heartbeat(self, name: str, args: dict) -> str:
+        """执行工具，显示心跳（每 5 秒），支持 Ctrl+C 中断"""
+        import threading
+        heartbeat_stop = threading.Event()
+        start_time = time.time()
+
+        def heartbeat():
+            """后台线程：每 5 秒显示执行时间"""
+            while not heartbeat_stop.wait(5.0):
+                elapsed = int(time.time() - start_time)
+                if self._term:
+                    self._term.tool_heartbeat(elapsed)
+
+        # 启动心跳线程
+        heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
+        heartbeat_thread.start()
+
+        try:
+            result = self.executor.execute(name, args)
+            return result
+        except KeyboardInterrupt:
+            if self._term:
+                self._term.tool_interrupted()
+            return "(x) 用户中断 (Ctrl+C)"
+        finally:
+            heartbeat_stop.set()  # 停止心跳线程
+            heartbeat_thread.join(timeout=0.5)
 
     def _reflect(self, trace, step_no, max_steps) -> Optional[str]:
         """结构性收敛：仅在达到最大步数时给予一次最终回答机会。"""
