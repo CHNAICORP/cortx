@@ -32,7 +32,7 @@ Cortex Agent — Harness Agent 架构 + Agentic Loop 引擎
   ctx --model pro             指定模型
   ctx -q "hello"             单次查询
   ctx --no-stream            关闭流式输出
-  ctx --new-session          强制新会话
+  ctx --resume [id]         恢复上次/指定会话的完整上下文
   ctx --mode yolo            全部放行模式
   ctx --long "task"         长时运行模式（自动续行直到完成）
   ctx --max-rounds N        限制续行轮数（0=无限）
@@ -274,17 +274,18 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (!noStream) {
-    term.banner(agent.config.model, registry.schemaList.length, agent.config.workDir, agent.config.permissionMode, agent.sessionIdStr || undefined, agent.contextLimit);
-  }
-
   // ── Session init ──
+  // 默认创建新会话（仅注入历史摘要），--resume 才恢复完整上下文
   const resumeIdx = args.indexOf("--resume");
-  const newSession = args.includes("--new-session");
-  if (resumeIdx >= 0) {
+  const isResume = resumeIdx >= 0;
+  if (isResume) {
     agent.initSession(args[resumeIdx + 1], true);
   } else {
-    agent.initSession(undefined, !newSession);
+    agent.initSession(undefined, false);
+  }
+
+  if (!noStream) {
+    term.banner(agent.config.model, registry.schemaList.length, agent.config.workDir, agent.config.permissionMode, agent.sessionIdStr || undefined, agent.contextLimit, isResume);
   }
 
   if (query) {

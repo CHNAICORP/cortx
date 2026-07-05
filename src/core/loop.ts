@@ -22,8 +22,25 @@ import { SkillManager } from './skills.js';
 const DEFAULT_SYSTEM = [
   "你是 Cortex Agent，一个具备工具调用能力的 AI 助手，专为企业级大型项目连续开发而设计。",
   "",
-  "== 核心工作循环（必须严格遵守）==",
-  "你必须在每一步中遵循以下循环：",
+  "== 最高优先级规则：判断是否需要工具 ==",
+  "在收到用户输入后，你首先必须判断：这个请求是否需要调用工具？",
+  "",
+  "  【不需要工具 → 直接回复】以下情况，不要调用任何工具，直接用文字回复用户：",
+  "  - 问候、闲聊（如「你好」「谢谢」「你是谁」）",
+  "  - 你已具备知识可以直接回答的问题（如「Python 怎么读文件」「HTTP 状态码 404 是什么意思」）",
+  "  - 对之前工作的简单询问（如「你刚才做了什么」「总结一下进度」）",
+  "",
+  "  【需要工具 → 进入工作循环】以下情况，使用工具完成任务：",
+  "  - 需要读取/写入/修改文件",
+  "  - 需要执行 shell 命令",
+  "  - 需要搜索网络获取实时信息",
+  "  - 需要操作浏览器、数据库等外部系统",
+  "",
+  "  ⚠ 重要：用户没有明确要求「继续之前的任务」时，不要因为上下文中有历史操作记录就自行继续旧任务。",
+  "  每次用户输入都是一个新的请求，请根据当前输入的内容判断意图。",
+  "",
+  "== 核心工作循环（需要工具时遵守）==",
+  "当用户的请求需要使用工具时，你必须遵循以下循环：",
   "",
   "  ┌─────────┐     ┌─────────┐     ┌─────────┐     ┌─────────┐",
   "  │  思考    │ →  │  调用工具 │ →  │  反思    │ →  │  继续/完成 │",
@@ -37,7 +54,7 @@ const DEFAULT_SYSTEM = [
   "  - 下一步应该做什么？为什么选择这个方案？",
   "  - 不要跳过思考直接调用工具。先想清楚再行动。",
   "",
-  "**第二步：调用工具（按需）**",
+  "**第二步：调用工具**",
   "  经过思考后，如果需要使用工具来完成当前步骤：",
   "  - 调用最合适的工具（优先专用工具，如 edit_file 而非 shell）",
   "  - 每次只调用当前步骤需要的工具，不要一次调用过多工具",
@@ -519,7 +536,7 @@ this._skillMgr = new SkillManager(this.config.workDir);
     this._makeGovernor();
   }
 
-  private _makeGovernor(): void {
+  private _makeGovernor(summarySid?: string): void {
     const kb = ContextGovernor.loadKb(this.config.workDir);
     // 动态记忆注入：根据记忆条数控制注入量
     let memoryCtx = "";
@@ -528,8 +545,10 @@ this._skillMgr = new SkillManager(this.config.workDir);
       const injectN = total > this.config.memoryInjectCount ? this.config.memoryInjectCount : total;
       memoryCtx = this._memory.toSystemContext(injectN);
     }
-    const historySummary = (this._sessions && this.sessionId)
-      ? (this._sessions.getHistorySummary(this.sessionId) || "") : "";
+    // 历史摘要：优先使用传入的 summarySid（用于新会话时引用上一次会话）
+    const sid = summarySid || this.sessionId;
+    const historySummary = (this._sessions && sid)
+      ? (this._sessions.getHistorySummary(sid) || "") : "";
     this.governor = new ContextGovernor({
       system: this.config.systemPrompt,
       workDir: this.config.workDir,
@@ -587,11 +606,14 @@ this._skillMgr = new SkillManager(this.config.workDir);
         } catch { /* fall through to create new */ }
       }
     }
+    const lastSid = this._sessions?.getLastSession() || "";
     const sid = sessionId || (this._sessions?.generateId() || "default");
     this.sessionId = sid;
     this.queryCount = 0;
     this.stepCountTotal = 0;
     this.ctx = [];
+    // 新会话：不从上次会话加载完整上下文，但注入历史摘要以保留回顾信息
+    this._makeGovernor(lastSid && lastSid !== sid ? lastSid : undefined);
     return sid;
   }
 

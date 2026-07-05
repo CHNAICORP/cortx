@@ -236,8 +236,21 @@ class ToolExecutor:
 
 DEFAULT_SYSTEM = (
     "你是 Cortex Agent，一个具备工具调用能力的 AI 助手，专为企业级大型项目连续开发而设计。\n\n"
-    "== 核心工作循环（必须严格遵守）==\n"
-    "你必须在每一步中遵循以下循环：\n\n"
+    "== 最高优先级规则：判断是否需要工具 ==\n"
+    "在收到用户输入后，你首先必须判断：这个请求是否需要调用工具？\n\n"
+    "  【不需要工具 → 直接回复】以下情况，不要调用任何工具，直接用文字回复用户：\n"
+    "  - 问候、闲聊（如「你好」「谢谢」「你是谁」）\n"
+    "  - 你已具备知识可以直接回答的问题（如「Python 怎么读文件」「HTTP 状态码 404 是什么意思」）\n"
+    "  - 对之前工作的简单询问（如「你刚才做了什么」「总结一下进度」）\n\n"
+    "  【需要工具 → 进入工作循环】以下情况，使用工具完成任务：\n"
+    "  - 需要读取/写入/修改文件\n"
+    "  - 需要执行 shell 命令\n"
+    "  - 需要搜索网络获取实时信息\n"
+    "  - 需要操作浏览器、数据库等外部系统\n\n"
+    "  ⚠ 重要：用户没有明确要求「继续之前的任务」时，不要因为上下文中有历史操作记录就自行继续旧任务。\n"
+    "  每次用户输入都是一个新的请求，请根据当前输入的内容判断意图。\n\n"
+    "== 核心工作循环（需要工具时遵守）==\n"
+    "当用户的请求需要使用工具时，你必须遵循以下循环：\n\n"
     "  ┌─────────┐     ┌─────────┐     ┌─────────┐     ┌─────────┐\n"
     "  │  思考    │ →  │  调用工具 │ →  │  反思    │ →  │  继续/完成 │\n"
     "  │ (Think)  │     │  (Act)   │     │(Reflect) │     │(Loop/Done)│\n"
@@ -248,7 +261,7 @@ DEFAULT_SYSTEM = (
     "  - 我已经知道什么？还缺少什么信息？\n"
     "  - 下一步应该做什么？为什么选择这个方案？\n"
     "  - 不要跳过思考直接调用工具。先想清楚再行动。\n\n"
-    "**第二步：调用工具（按需）**\n"
+    "**第二步：调用工具**\n"
     "  经过思考后，如果需要使用工具来完成当前步骤：\n"
     "  - 调用最合适的工具（优先专用工具，如 edit_file 而非 shell）\n"
     "  - 每次只调用当前步骤需要的工具，不要一次调用过多工具\n\n"
@@ -735,8 +748,12 @@ class CortexAgent:
         # ── Permission decision memory (session-scoped) ──
         self._permission_decisions: Dict[str, bool] = {}
 
-    def _make_governor(self) -> ContextGovernor:
-        """构建 ContextGovernor，注入知识库+记忆+历史摘要+上下文窗口配置。"""
+    def _make_governor(self, summary_sid: str = None) -> ContextGovernor:
+        """构建 ContextGovernor，注入知识库+记忆+历史摘要+上下文窗口配置。
+
+        Args:
+            summary_sid: 可选，指定从哪个会话提取历史摘要（用于新会话时引用上一次会话）。
+        """
         kb_ctx = self._load_kb()
         # 动态记忆注入：根据记忆条数和上下文预算决定注入量
         memory_ctx = ""
@@ -744,9 +761,10 @@ class CortexAgent:
             total = self.memory.count()
             inject_n = min(total, self.config.memory_inject_count) if total > self.config.memory_inject_count else total
             memory_ctx = self.memory.to_system_context(max_entries=inject_n)
+        sid = summary_sid or self._session_id
         history_summary = ""
-        if self.sessions and self._session_id:
-            history_summary = self.sessions.get_history_summary(self._session_id) or ""
+        if self.sessions and sid:
+            history_summary = self.sessions.get_history_summary(sid) or ""
         return ContextGovernor(self.config.system_prompt,
                                self._work_dir_path(), self.config.max_context_msgs,
                                memory_context=memory_ctx, history_summary=history_summary,
@@ -867,9 +885,12 @@ class CortexAgent:
                 sid = session_id or self.sessions.generate_id()
                 self._session_id = sid; self._query_count = 0; self._step_count_total = 0; self._ctx = []
         else:
+            last_sid = self.sessions.get_last_session() if self.sessions else ""
             sid = session_id or (self.sessions.generate_id() if self.sessions else "default")
             self._session_id = sid; self._query_count = 0; self._step_count_total = 0; self._ctx = []
-        # governor 已在方法开头构建
+            # 新会话：不从上次会话加载完整上下文，但注入历史摘要以保留回顾信息
+            summary_sid = last_sid if (last_sid and last_sid != sid) else None
+            self.governor = self._make_governor(summary_sid)
         return sid
 
     def run(self, query: str, max_steps: int = None, keep_history: bool = False) -> str:

@@ -6,8 +6,7 @@ Cortex Agent CLI — 入口 + 工厂函数
   python main.py --work-dir ./ws          # 工作目录
   python main.py -q "search for Python"   # 单次查询
   python main.py --no-stream              # 关闭流式输出
-  python main.py --new-session            # 强制新会话
-  python main.py --resume <SESSION_ID>    # 恢复到指定会话
+  python main.py --resume <SESSION_ID>    # 恢复到指定会话的完整上下文
   python main.py --list-sessions          # 列出已保存会话
   python main.py --init-config            # 创建默认 .cortex/settings.json
 """
@@ -174,9 +173,8 @@ def main():
     p.add_argument("--max-rounds", type=int, default=None, help="限制续行轮数（0=无限）")
     p.add_argument("--no-stream", action="store_true", help="关闭流式输出")
     p.add_argument("--query","-q", default=None, help="单次查询")
-    p.add_argument("--resume", default=None, metavar="SESSION_ID", help="恢复到指定会话")
+    p.add_argument("--resume", default=None, metavar="SESSION_ID", help="恢复到指定会话的完整上下文")
     p.add_argument("--list-sessions", action="store_true", help="列出已保存的会话")
-    p.add_argument("--new-session", action="store_true", help="强制创建新会话")
     p.add_argument("--init-config", action="store_true", help="创建默认 .cortex/settings.json")
     p.add_argument("--mode", default=None, choices=["standard","auto","yolo"],
                    help="权限模式: standard|auto|yolo")
@@ -245,12 +243,11 @@ def main():
         return
 
     # Determine session mode
+    # 默认创建新会话（仅注入历史摘要），--resume 才恢复完整上下文
     if args.resume:
         agent.init_session(session_id=args.resume, resume=True)
-    elif args.new_session:
-        agent.init_session(resume=False)
     else:
-        agent.init_session(resume=True)  # 默认尝试恢复
+        agent.init_session(resume=False)
 
     if term.enabled:
         sid_display = ""
@@ -258,7 +255,7 @@ def main():
             sid_display = agent.session_id[:20] + "..." if len(agent.session_id) > 20 else agent.session_id
         term.banner(agent.model, len(registry.schemas), wd,
                     session_id=sid_display, mode=agent.config.permission_mode,
-                    context_limit=agent.context_limit)
+                    context_limit=agent.context_limit, is_resume=bool(args.resume))
 
     # ── Skills 系统通过 agent.skill_mgr 访问 ──
     if args.query:

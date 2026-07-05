@@ -9,4 +9,4 @@ from .cortex_agent import CortexAgent, AgentConfig, LLMProvider, registry
 from .policy import PolicyEngine
 from . import tools as _tools  # noqa: F401 — 触发工具注册
 
-__version__ = '2.0.2'
+__version__ = '2.0.3'

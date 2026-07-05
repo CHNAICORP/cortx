@@ -155,7 +155,7 @@ class Terminal:
         "yolo":     {"color": "\033[38;5;196m", "icon": "⚠", "label": "YOLO",    "desc": "无限制"},
     }
 
-    def banner(self, model: str, tools: int, work_dir: str, session_id: str = "", mode: str = "standard", context_limit: int = 0):
+    def banner(self, model: str, tools: int, work_dir: str, session_id: str = "", mode: str = "standard", context_limit: int = 0, is_resume: bool = False):
         meta = self._MODE_META.get(mode, {"color": self.GRAY, "icon": "?", "label": mode, "desc": ""})
         mc = meta["color"]
         mi = meta["icon"]
@@ -181,7 +181,8 @@ class Terminal:
         self._w(perm_line + "\n")
         # Session
         if session_id:
-            self._w(f"  {self.GRAY}Session: {session_id}{self.RESET}\n")
+            resume_tag = " (已恢复)" if is_resume else " (新会话)"
+            self._w(f"  {self.GRAY}Session: {session_id}{resume_tag}{self.RESET}\n")
         # 工作目录
         self._w(f"  {self.GRAY}{work_dir}{self.RESET}\n")
         # 底边

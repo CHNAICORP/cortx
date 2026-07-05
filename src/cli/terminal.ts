@@ -112,7 +112,7 @@ export class Terminal {
     yolo:     { color: Terminal.RED,    icon: "⚠", label: "YOLO",    desc: "无限制" },
   };
 
-  banner(model: string, tools: number, workDir: string, mode: string, sessionId?: string, contextLimit?: number) {
+  banner(model: string, tools: number, workDir: string, mode: string, sessionId?: string, contextLimit?: number, isResume?: boolean) {
     const meta = Terminal.MODE_META[mode] || { color: Terminal.GRAY, icon: "?", label: mode, desc: "" };
     // 格式化上下文容量
     let ctxStr = "";
@@ -129,7 +129,7 @@ export class Terminal {
     this.write(modelLine + "\n");
     // 权限行
     this.write(`  ${meta.color}${meta.icon} ${meta.label}${Terminal.RESET}  ${Terminal.DIM}${meta.desc}${Terminal.RESET}  ${Terminal.GRAY}(Shift+Tab 切换)${Terminal.RESET}\n`);
-    if (sessionId) this.write(`  ${Terminal.GRAY}Session: ${sessionId}${Terminal.RESET}\n`);
+    if (sessionId) this.write(`  ${Terminal.GRAY}Session: ${sessionId}${isResume ? " (已恢复)" : " (新会话)"}${Terminal.RESET}\n`);
     this.write(`  ${Terminal.GRAY}${workDir}${Terminal.RESET}\n`);
     this.write(`${Terminal.CYAN}╚${"═".repeat(52)}╝${Terminal.RESET}\n`);
   }
