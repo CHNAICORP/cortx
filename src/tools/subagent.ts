@@ -14,8 +14,8 @@ import { RiskLevel, Capability } from '../core/types.js';
 import { getToolContext } from '../core/tool_context.js';
 
 registry.register(
-  "生成子代理执行独立任务。子代理拥有独立的上下文和工具集，执行完毕后返回结果。\\n"
-  + "适用于将复杂任务分解为子任务，避免污染主对话上下文。\\n"
+  "生成子代理执行独立任务。子代理拥有独立的上下文和工具集，执行完毕后返回结果。\n"
+  + "适用于将复杂任务分解为子任务，避免污染主对话上下文。\n"
   + "用法: spawn_subagent(task=\"搜索所有 API 端点并生成文档\")",
   RiskLevel.SYSTEM, Capability.SHELL,
   { workDir: "string", task: "string", model: "string" },

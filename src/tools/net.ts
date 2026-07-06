@@ -18,7 +18,7 @@ import { checkSsrf } from '../core/policy.js';
 import * as https from "node:https";
 import * as http from "node:http";
 
-async function httpRequest(url: string, method = 'GET', body?: string, timeout = 10000, extraHeaders: Record<string, string> = {}): Promise<string> {
+async function httpRequest(url: string, method = 'GET', body?: string, timeout = 10000, extraHeaders: Record<string, string> = {}, maxRedirects = 5): Promise<string> {
   const reqUrl = new URL(url);
   // SSRF check via policy engine (includes DNS resolution + CIDR matching)
   const [ssrfOk, ssrfMsg] = await checkSsrf(reqUrl.hostname);
@@ -62,9 +62,13 @@ async function httpRequest(url: string, method = 'GET', body?: string, timeout =
         const loc = res.headers.location;
         try {
           const locUrl = new URL(loc, url);
-          // 仅跟随同域名重定向 — 递归调用 httpRequest 会再次执行 SSRF 检查
+          // 仅跟随同域名重定向，限制最大深度避免无限循环
           if (locUrl.hostname === reqUrl.hostname) {
-            resolve(httpRequest(locUrl.href, method, body, timeout, extraHeaders));
+            if (maxRedirects <= 0) {
+              reject(new Error("超过最大重定向次数 (5)"));
+              return;
+            }
+            resolve(httpRequest(locUrl.href, method, body, timeout, extraHeaders, maxRedirects - 1));
             return;
           }
         } catch { /* 继续 */ }

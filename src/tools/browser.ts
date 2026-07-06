@@ -11,6 +11,8 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import * as http from "http";
+import * as net from "net";
+import * as crypto from "crypto";
 import { registry } from '../core/registry.js';
 import { RiskLevel, Capability } from '../core/types.js';
 
@@ -47,6 +49,79 @@ function _httpPut(port: number, urlPath: string): Promise<any> {
     req.on("error", reject);
     req.setTimeout(5000, () => { req.destroy(); reject(new Error("timeout")); });
     req.end();
+  });
+}
+
+// ── CDP WebSocket 客户端（零依赖实现，移植自 Python _cdp_ws_send）──
+
+function _cdpWsSend(wsUrl: string, payload: string, timeout = 8000): Promise<string> {
+  return new Promise((resolve) => {
+    const m = wsUrl.match(/^ws:\/\/([^:]+):(\d+)(\/.+)$/);
+    if (!m) { resolve(""); return; }
+    const host = m[1], port = parseInt(m[2], 10), wsPath = m[3];
+    const sock = net.createConnection({ host, port }, () => {
+      // 1. HTTP upgrade handshake
+      const key = crypto.randomBytes(16).toString("base64");
+      const upgrade = `GET ${wsPath} HTTP/1.1\r\nHost: ${host}:${port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`;
+      sock.write(upgrade);
+    });
+    sock.setTimeout(timeout);
+    let buf = Buffer.alloc(0);
+    let upgraded = false;
+    let resolved = false;
+    const finish = (val: string) => { if (!resolved) { resolved = true; sock.destroy(); resolve(val); } };
+
+    sock.on("data", (chunk: Buffer) => {
+      buf = Buffer.concat([buf, chunk]);
+      if (!upgraded) {
+        const idx = buf.indexOf("\r\n\r\n");
+        if (idx < 0) return;
+        const header = buf.slice(0, idx).toString();
+        if (!header.includes("101")) { finish(""); return; }
+        buf = buf.slice(idx + 4);
+        upgraded = true;
+        // 2. 发送 masked text frame
+        const payloadBytes = Buffer.from(payload, "utf-8");
+        const plen = payloadBytes.length;
+        const mask = crypto.randomBytes(4);
+        let header2: Buffer;
+        if (plen < 126) header2 = Buffer.alloc(6);
+        else if (plen < 65536) header2 = Buffer.alloc(8);
+        else header2 = Buffer.alloc(14);
+        header2[0] = 0x81;
+        if (plen < 126) { header2[1] = 0x80 | plen; mask.copy(header2, 2); }
+        else if (plen < 65536) { header2[1] = 0x80 | 126; header2.writeUInt16BE(plen, 2); mask.copy(header2, 4); }
+        else { header2[1] = 0x80 | 127; header2.writeBigUInt64BE(BigInt(plen), 2); mask.copy(header2, 10); }
+        const masked = Buffer.alloc(plen);
+        for (let i = 0; i < plen; i++) masked[i] = payloadBytes[i] ^ mask[i % 4];
+        sock.write(Buffer.concat([header2, masked]));
+      }
+      // 3. 解析响应帧
+      if (upgraded && buf.length >= 2) {
+        const finOp = buf[0];
+        if ((finOp & 0x0f) === 0x01) {  // text frame
+          const maskFlag = (buf[1] & 0x80) !== 0;
+          let plen7 = buf[1] & 0x7f;
+          let hdrLen = 2;
+          if (plen7 === 126) { if (buf.length < 4) return; plen7 = buf.readUInt16BE(2); hdrLen = 4; }
+          else if (plen7 === 127) { if (buf.length < 10) return; plen7 = Number(buf.readBigUInt64BE(2)); hdrLen = 10; }
+          const total = hdrLen + (maskFlag ? 4 : 0) + plen7;
+          if (buf.length >= total) {
+            const dataStart = hdrLen + (maskFlag ? 4 : 0);
+            let data = buf.slice(dataStart, dataStart + plen7);
+            if (maskFlag) {
+              const masks = buf.slice(hdrLen, hdrLen + 4);
+              const out = Buffer.alloc(plen7);
+              for (let i = 0; i < plen7; i++) out[i] = data[i] ^ masks[i % 4];
+              data = out;
+            }
+            finish(data.toString("utf-8"));
+          }
+        }
+      }
+    });
+    sock.on("error", () => finish(""));
+    sock.on("timeout", () => finish(""));
   });
 }
 
@@ -203,16 +278,27 @@ registry.register(
   "截取浏览器页面截图保存到文件。\n用法: browser_screenshot(path=\"browser.png\")",
   RiskLevel.WRITE, Capability.BROWSER,
   { workDir: "string", outPath: "string" },
-  async function browser_screenshot(_workDir: string, args: Record<string, unknown>): Promise<string> {
+  async function browser_screenshot(workDir: string, args: Record<string, unknown>): Promise<string> {
     const ws = await getBrowserWs();
-    if (!ws) return "(x) 浏览器未连接";
+    if (!ws) return "(x) 浏览器未连接。请先 browser_navigate 打开页面";
     const p = String(args["outPath"] || "browser_screenshot.png");
+    const d = path.resolve(path.isAbsolute(p) ? p : path.join(workDir, p));
     try {
-      // 获取页面列表
+      // 1. 获取页面列表，找到第一个 type=page 且有 webSocketDebuggerUrl 的页面
       const pages = await _httpGet(9222, "/json");
       if (!Array.isArray(pages) || !pages.length) return "(x) 浏览器无打开的页面";
-      // 截图功能需要 WebSocket CDP 支持，当前版本仅返回页面信息
-      return `浏览器已连接 (${pages.length} 个页面)。截图路径: ${p}。注意: 截图功能暂未实现，当前仅返回页面列表。`;
+      const target = pages.find((pg: any) => pg.type === "page" && pg.webSocketDebuggerUrl);
+      if (!target) return "(x) 没有可用的页面 WebSocket URL";
+      // 2. 通过 WebSocket 发送 Page.captureScreenshot CDP 命令
+      const cdpCmd = JSON.stringify({ id: 1, method: "Page.captureScreenshot", params: { format: "png" } });
+      const resultRaw = await _cdpWsSend(target.webSocketDebuggerUrl, cdpCmd, 8000);
+      if (!resultRaw) return "(x) CDP WebSocket 无响应";
+      const result = JSON.parse(resultRaw);
+      const imgB64 = result?.result?.data;
+      if (!imgB64) return `(x) CDP 截图失败: ${resultRaw.slice(0, 200)}`;
+      // 3. 解码 base64 写入文件
+      fs.writeFileSync(d, Buffer.from(imgB64, "base64"));
+      return `浏览器截图已保存: ${p} (${fs.statSync(d).size.toLocaleString()} bytes)`;
     } catch (e: any) {
       return `(x) 截图失败: ${e.message || e}`;
     }

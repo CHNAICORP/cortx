@@ -17,23 +17,70 @@ const SSRF_BLOCKED_NETS = [
   "fc00::/7", "fe80::/10",
 ];
 
+/** 将 IPv6 地址转为 BigInt（128 位），便于精确 CIDR 前缀匹配。失败返回 null。 */
+function ipv6ToBigInt(ip: string): bigint | null {
+  try {
+    const norm = normalizeIPv6(ip);
+    if (!norm) return null;
+    let result = 0n;
+    for (const group of norm.split(":")) {
+      result = (result << 16n) | BigInt(parseInt(group, 16));
+    }
+    return result;
+  } catch { return null; }
+}
+
+/** 规范化 IPv6 地址为 8 组 4 位 hex（不含 ::）。返回 null 表示格式非法。*/
+function normalizeIPv6(ip: string): string | null {
+  try {
+    // 去掉 zone index
+    ip = ip.split("%")[0].toLowerCase();
+    // 处理 IPv4-mapped (::ffff:a.b.c.d)
+    const v4Match = ip.match(/(.*:)(\d+\.\d+\.\d+\.\d+)$/);
+    if (v4Match) {
+      const parts = v4Match[2].split(".").map(Number);
+      if (parts.length !== 4 || parts.some(n => isNaN(n) || n < 0 || n > 255)) return null;
+      const hex1 = ((parts[0] << 8) | parts[1]).toString(16).padStart(4, "0");
+      const hex2 = ((parts[2] << 8) | parts[3]).toString(16).padStart(4, "0");
+      ip = v4Match[1] + hex1 + ":" + hex2;
+    }
+    // 展开 ::
+    const dblIdx = ip.indexOf("::");
+    if (dblIdx >= 0) {
+      if (ip.indexOf("::", dblIdx + 1) >= 0) return null; // 只能有一个 ::
+      const head = ip.slice(0, dblIdx);
+      const tail = ip.slice(dblIdx + 2);
+      const headGroups = head ? head.split(":") : [];
+      const tailGroups = tail ? tail.split(":") : [];
+      const fill = 8 - headGroups.length - tailGroups.length;
+      if (fill < 0) return null;
+      const groups = [...headGroups, ...Array(fill).fill("0"), ...tailGroups];
+      ip = groups.join(":");
+    }
+    const groups = ip.split(":");
+    if (groups.length !== 8) return null;
+    return groups.map(g => g.padStart(4, "0")).join(":");
+  } catch { return null; }
+}
+
 function ipInCidr(ip: string, cidr: string): boolean {
-  // Full CIDR check covering both IPv4 and IPv6
-  if (ip.includes(":") && cidr.includes(":")) {
-    // IPv6 CIDR — simple prefix match for the listed ranges
-    const [ipNorm] = ip.toLowerCase().split("%"); // strip zone index
-    const [netStr, bitsStr] = cidr.split("/");
-    const bits = parseInt(bitsStr);
-    // For /128: exact match; for /7 and /10: prefix match
-    if (bits >= 64) return ipNorm === netStr.toLowerCase();
-    return ipNorm.toLowerCase().startsWith(netStr.toLowerCase().slice(0, Math.ceil(bits / 4)));
-  }
-  if (!ip.includes(".") || !cidr.includes(".")) return false;
-  const [ipA, ipB, ipC, ipD] = ip.split(".").map(Number);
   const [netStr, bitsStr] = cidr.split("/");
   const bits = parseInt(bitsStr);
+  if (isNaN(bits)) return false;
+  // IPv6 路径
+  if (cidr.includes(":")) {
+    const ipBig = ipv6ToBigInt(ip);
+    const netBig = ipv6ToBigInt(netStr);
+    if (ipBig === null || netBig === null) return false;
+    if (bits <= 0) return true;
+    if (bits > 128) return false;
+    const mask = (2n ** 128n - 1n) << BigInt(128 - bits) & (2n ** 128n - 1n);
+    return (ipBig & mask) === (netBig & mask);
+  }
+  // IPv4 路径
+  if (!ip.includes(".") ) return false;
+  const [ipA, ipB, ipC, ipD] = ip.split(".").map(Number);
   const [nA, nB, nC, nD] = netStr.split(".").map(Number);
-  // Guard against NaN (e.g., "localhost" passed as IP)
   if (isNaN(ipA) || isNaN(nA) || bits > 32) return false;
   const ipNum = ((ipA << 24) | (ipB << 16) | (ipC << 8) | ipD) >>> 0;
   const netNum = ((nA << 24) | (nB << 16) | (nC << 8) | nD) >>> 0;

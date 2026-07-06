@@ -193,11 +193,23 @@ class ToolExecutor:
         self.reg = registry; self.work_dir = work_dir; self.timeout = timeout
         self.max_result_chars = max_result_chars if max_result_chars > 0 else ToolExecutor.MAX_RESULT_CHARS
 
+    # camelCase → snake_case 别名映射，使 Python 端兼容 TS 风格的参数名
+    _CAMEL_ALIASES = {
+        "filePath": "path", "dirPath": "path", "outPath": "out_path",
+        "oldString": "old_string", "newString": "new_string",
+        "fileA": "file_a", "fileB": "file_b", "globFilter": "glob_filter",
+        "maxResults": "max_results", "maxChars": "max_chars",
+        "allowedDomains": "allowed_domains", "blockedDomains": "blocked_domains",
+        "branchName": "branch_name", "taskId": "task_id",
+    }
+
     def execute(self, name: str, args: dict) -> str:
         fn = self.reg.get(name)
         if not fn: return f"(x) 未知工具: {name}"
         try:
             clean = {k: v for k, v in args.items() if k != "work_dir"}
+            # camelCase 别名归一化：接受 TS 风格参数名，转为本工具的 snake_case
+            clean = {self._CAMEL_ALIASES.get(k, k): v for k, v in clean.items()}
             result = fn(self.work_dir, **clean)
             result = str(result) if not isinstance(result, str) else result
             return self._truncate(result)

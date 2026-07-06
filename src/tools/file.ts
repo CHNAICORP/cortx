@@ -186,6 +186,20 @@ registry.register("文件差异对比", RiskLevel.SAFE, Capability.FS_READ,
     if (!fs.existsSync(pb)) return `(x) 文件不存在: ${b}`;
     const ca = fs.readFileSync(pa, "utf-8").split("\n");
     const cb = fs.readFileSync(pb, "utf-8").split("\n");
+    // 防止大文件 OOM：LCS 表为 O(n*m)，限制总行数
+    const MAX_DIFF_LINES = 4000;
+    if (ca.length > MAX_DIFF_LINES || cb.length > MAX_DIFF_LINES) {
+      // 退化为按行截断的简单差异
+      const limit = 200;
+      const head = Math.min(ca.length, limit);
+      const tailA = ca.slice(head), tailB = cb.slice(head);
+      const lines: string[] = [`--- ${a}\n+++ ${b}`];
+      for (let k = 0; k < head; k++) {
+        if (ca[k] !== cb[k]) { lines.push(`- ${ca[k]}`); lines.push(`+ ${cb[k]}`); }
+      }
+      if (tailA.length || tailB.length) lines.push(`(文件过大，仅对比前 ${head} 行；后续 ${tailA.length}/${tailB.length} 行省略)`);
+      return lines.length > 1 ? lines.join("\n") : "(文件完全相同)";
+    }
     // Unified diff (LCS-based, matching Python difflib.unified_diff output)
     const diff: string[] = [];
     const n = ca.length, m = cb.length;

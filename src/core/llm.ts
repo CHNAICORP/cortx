@@ -354,6 +354,14 @@ export class LLMProvider {
     };
   }
 
+  /** 检查 HTTP 响应状态，非 2xx 抛出含状态码与错误信息的异常（避免静默吞掉 401/429/500）*/
+  private async _checkHttp(resp: Response, label: string): Promise<void> {
+    if (resp.ok) return;
+    let detail = "";
+    try { detail = JSON.stringify(await resp.text()).slice(0, 300); } catch { /* ignore */ }
+    throw new Error(`${label} HTTP ${resp.status} ${resp.statusText}: ${detail}`);
+  }
+
   private async _callAnthropic(messages: Message[], thinking: boolean): Promise<LLMResponse> {
     const { system, msgs } = this._convertMessagesToAnthropic(messages);
     const body: Record<string, unknown> = {
@@ -376,6 +384,7 @@ export class LLMProvider {
       signal: AbortSignal.timeout(this.timeout * 1000),
     });
 
+    await this._checkHttp(resp, "Anthropic");
     const data = await resp.json() as Record<string, unknown>;
     return this._parseAnthropicResponse(data);
   }
@@ -409,6 +418,7 @@ export class LLMProvider {
       signal: AbortSignal.timeout(this.timeout * 1000),
     });
 
+    await this._checkHttp(resp, "Anthropic-stream");
     const reader = resp.body?.getReader();
     const decoder = new TextDecoder();
     const textParts: string[] = [];
@@ -531,6 +541,7 @@ export class LLMProvider {
       signal: AbortSignal.timeout(this.timeout * 1000),
     });
 
+    await this._checkHttp(resp, "OpenAI");
     const data: Record<string, unknown> = await resp.json() as Record<string, unknown>;
     this.callCount++;
     if (data.usage) {
@@ -590,6 +601,7 @@ export class LLMProvider {
       signal: AbortSignal.timeout(this.timeout * 1000),
     });
 
+    await this._checkHttp(resp, "OpenAI-stream");
     const reader = resp.body?.getReader();
     const decoder = new TextDecoder();
     const textParts: string[] = [];
