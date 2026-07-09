@@ -168,7 +168,9 @@ export class PolicyEngine {
 
   // Tier 1 regex patterns — context-sensitive shell detection
   static SHELL_BLOCK_RE: [RegExp, string][] = [
-    [/(?:^|\s|;)(?:-[eE][nNcCoOdDeEdDcCoOmMmMaAnNdD]*)\s/, "禁止 PowerShell 编码命令 (-e/-en/-enc)"],
+    // 仅拦截 PowerShell 编码命令（powershell/pwsh 上下文中的 -enc/-encodedcommand）
+    // 不再拦截 node -e / python -e 等开发常用命令
+    [/(?:powershell|pwsh)[\s\.\-].*(?:-(?:enc|encodedcommand)\s)/i, "禁止 PowerShell 编码命令 (-EncodedCommand)"],
     // 仅拦截针对根目录的批量静默删除
     [/del\s+\/[a-z]*s[a-z]*\s+\/q\s+[a-z]:\\?\s*$/i,  "禁止批量静默删除根目录"],
   ];
@@ -267,12 +269,26 @@ export class PolicyEngine {
       }
     }
 
-    // ── 内容审计（始终执行，即使 yolo 模式也不跳过）──
-    // 文档: "A dangerous command is always blocked"
-    // 判决链: meta lookup → content audit → permission mode → yolo bypass
-    // MCP/BROWSER 能力：跳过内容审计（不是 shell/http 命令）
+    // ── 内容审计 ──
+    // yolo 模式：仅拦截极端危险命令（系统级毁灭），跳过其余内容审计
+    // auto/standard 模式：完整内容审计
     let contentOk = true;
     let contentReason = "";
+    if (this.config.permissionMode === "yolo") {
+      // yolo 模式：仅检查极端危险命令（rm -rf /, format, shutdown 等）
+      if (cap === Capability.SHELL) {
+        const cmd = String(args["command"] || "");
+        const low = cmd.toLowerCase();
+        for (const p of PolicyEngine.SHELL_BLOCK_SUBSTR) {
+          if (low.includes(p.toLowerCase())) {
+            return [false, `YOLO 模式仍拦截极端危险命令: ${p}`];
+          }
+        }
+      }
+      // yolo 模式跳过 SQL/Python/SSRF/路径审计
+      return [true, ""];
+    }
+    // auto/standard 模式：完整内容审计
     if (cap === Capability.DB_READ) {
       [contentOk, contentReason] = this.auditSql(String(args["sql"] || ""));
     } else if (cap === Capability.SHELL) {
@@ -286,13 +302,10 @@ export class PolicyEngine {
       [contentOk, contentReason] = this.auditPathWrite(args);
     }
     // MCP / BROWSER: 无内容审计 — 直接进入权限判决
-    // 内容审计失败 → 直接拒绝（即使在 yolo 模式下）
+    // 内容审计失败 → 直接拒绝
     if (!contentOk) return [false, contentReason];
 
-    // yolo = 跳过权限检查，放行（内容审计已通过）
-    if (this.config.permissionMode === "yolo") return [true, ""];
-
-    // ── 权限判决 ──
+    // ── 权限判决（yolo 模式已在上文提前返回）──
     const verdict = this.checkPermission(risk, isOutside);
     if (verdict === AuditVerdict.CONFIRM) return [false, "confirm"];
     if (verdict === AuditVerdict.DENY) return [false, "denied"];

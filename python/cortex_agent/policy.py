@@ -52,8 +52,10 @@ class PolicyEngine:
 
     # Tier 1 regex patterns — context-sensitive detection
     SHELL_BLOCK_RE = [
-        (re.compile(r'(?:^|\s|;)(?:-[eE][nNcCoOdDeEdDcCoOmMmMaAnNdD]*)\s'),
-                                                          "禁止 PowerShell 编码命令 (-e/-en/-enc/-enco/-ec)"),
+        # 仅拦截 PowerShell 编码命令（powershell/pwsh 上下文中的 -enc/-encodedcommand）
+        # 不再拦截 node -e / python -e 等开发常用命令
+        (re.compile(r'(?:powershell|pwsh)[\s\.\-].*(?:-(?:enc|encodedcommand)\s)', re.I),
+                                                          "禁止 PowerShell 编码命令 (-EncodedCommand)"),
         # 仅拦截针对根目录的批量静默删除
         (re.compile(r'del\s+/[a-z]*s[a-z]*\s+/q\s+[a-z]:\\?\s*$', re.I),  "禁止批量静默删除根目录"),
     ]
@@ -159,12 +161,23 @@ class PolicyEngine:
                     is_outside = self.is_outside_workspace(args[pname])
                     if is_outside:
                         break
-        # ── 内容审计（始终执行，即使 yolo 模式也不跳过）──
-        # 文档: "A dangerous command is always blocked"
-        # 判决链: meta lookup → content audit → permission mode → yolo bypass
-        # MCP/BROWSER 能力：跳过内容审计（不是 shell/http 命令）
+        # ── 内容审计 ──
+        # yolo 模式：仅拦截极端危险命令（系统级毁灭），跳过其余内容审计
+        # auto/standard 模式：完整内容审计
         content_ok = True
         content_reason = ""
+        mode = getattr(self.config, 'permission_mode', 'standard') if self.config else 'standard'
+        if mode == "yolo":
+            # yolo 模式：仅检查极端危险命令（rm -rf /, format, shutdown 等）
+            if cap == Capability.SHELL:
+                cmd = args.get("command", "")
+                low = cmd.lower()
+                for p in self.SHELL_BLOCK_SUBSTR:
+                    if p.lower() in low:
+                        return False, f"YOLO 模式仍拦截极端危险命令: {p}"
+            # yolo 模式跳过 SQL/Python/SSRF/路径审计
+            return True, ""
+        # auto/standard 模式：完整内容审计
         if cap == Capability.DB_READ:
             content_ok, content_reason = self._audit_sql(args.get("sql", ""))
         elif cap == Capability.SHELL:

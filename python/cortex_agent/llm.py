@@ -242,7 +242,8 @@ class LLMProvider:
     @property
     def cache_stats(self) -> dict:
         """返回缓存统计信息。"""
-        rate = (self._cache_hits / self._call_count * 100) if self._call_count > 0 else 0
+        # 正确的平均缓存命中率 = 已缓存 token / 总输入 token
+        rate = (self._total_cached_tokens / self._total_input_tokens * 100) if self._total_input_tokens > 0 else 0
         return {
             "calls": self._call_count,
             "cache_hits": self._cache_hits,
@@ -482,6 +483,8 @@ class LLMProvider:
         finish_reason = ""
         current_block_type = None
         current_block_idx = -1
+        anthropic_input_tokens = 0
+        anthropic_cached_tokens = 0
 
         for line in resp.iter_lines():
             if not line:
@@ -539,10 +542,23 @@ class LLMProvider:
             elif etype == "content_block_stop":
                 current_block_type = None
 
+            elif etype == "message_start":
+                # Anthropic message_start 包含 input_tokens 和 cache_read_input_tokens
+                msg_obj = evt.get("message", {})
+                usage = msg_obj.get("usage", {}) or evt.get("usage", {})
+                anthropic_input_tokens = usage.get("input_tokens", 0)
+                anthropic_cached_tokens = usage.get("cache_read_input_tokens", 0)
+
             elif etype == "message_delta":
                 delta = evt.get("delta", {})
                 if delta.get("stop_reason"):
                     finish_reason = delta["stop_reason"]
+                # message_delta 可能包含更新后的 usage
+                usage = evt.get("usage", {})
+                if usage.get("input_tokens"):
+                    anthropic_input_tokens = usage["input_tokens"]
+                if usage.get("cache_read_input_tokens"):
+                    anthropic_cached_tokens = usage["cache_read_input_tokens"]
 
             elif etype == "message_stop":
                 break
@@ -560,10 +576,17 @@ class LLMProvider:
                     args = {}
                 tcs.append({"id": tb["id"], "name": tb["name"], "args": args})
 
-        # 流式调用：至少计数 + 估算 token
+        # 更新缓存统计：使用 Anthropic 流式返回的实际 token 数
         self._call_count += 1
-        total_chars = sum(len(m.get("content", "") or "") for m in messages)
-        self._total_input_tokens += int(total_chars * 0.4)
+        if anthropic_input_tokens > 0:
+            self._total_input_tokens += anthropic_input_tokens
+            self._total_cached_tokens += anthropic_cached_tokens
+            if anthropic_cached_tokens > 0:
+                self._cache_hits += 1
+        else:
+            # fallback：估算
+            total_chars = sum(len(m.get("content", "") or "") for m in messages)
+            self._total_input_tokens += int(total_chars * 0.4)
 
         return text, tcs, reasoning, finish_reason
 
@@ -625,7 +648,11 @@ class LLMProvider:
         reasoning_done = False
         tool_seen = False
         finish_reason = ""
+        stream_usage = None
         for chunk in resp:
+            # 提取 usage 信息（通常在最后一个 chunk）
+            if hasattr(chunk, 'usage') and chunk.usage:
+                stream_usage = chunk.usage
             choice = chunk.choices[0] if chunk.choices else None
             if choice and choice.finish_reason:
                 finish_reason = choice.finish_reason
@@ -661,8 +688,17 @@ class LLMProvider:
                 try: args = json.loads(tb["args_json"])
                 except json.JSONDecodeError: args = {}
                 tcs.append({"id": tb["id"], "name": tb["name"], "args": args})
-        # 流式调用：至少计数 + 估算 token
+        # 更新缓存统计：优先使用实际 usage，否则估算
         self._call_count += 1
-        total_chars = sum(len(m.get("content", "") or "") for m in messages)
-        self._total_input_tokens += int(total_chars * 0.4)
+        if stream_usage:
+            self._total_input_tokens += getattr(stream_usage, 'prompt_tokens', 0) or 0
+            cached_details = getattr(stream_usage, 'prompt_tokens_details', None)
+            if cached_details:
+                ct = getattr(cached_details, 'cached_tokens', 0) or 0
+                self._total_cached_tokens += ct
+                if ct > 0:
+                    self._cache_hits += 1
+        else:
+            total_chars = sum(len(m.get("content", "") or "") for m in messages)
+            self._total_input_tokens += int(total_chars * 0.4)
         return text, tcs, reasoning, finish_reason

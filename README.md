@@ -89,6 +89,20 @@ ctx -q "用 HTML5 Canvas 做一个打砖块 Breakout 游戏，单文件 index.ht
 
 👉 **查看游戏源码**: [github.com/CHNAICORP/cortx-demo-breakout](https://github.com/CHNAICORP/cortx-demo-breakout) · 🎮 **直接打开即玩**
 
+### 🎮 AI 游戏开发 SaaS 平台 — [gamespark](https://github.com/CHNAICORP/gamespark)
+
+> 使用 **Cortx Agent + LingClaw ADE** 协同开发完成的完整 SaaS 平台。
+
+| 指标 | 数据 |
+|------|------|
+| **源文件数** | 36 个 |
+| **技术栈** | React 18 + TypeScript + Vite 5 + Tailwind CSS 3 + Express.js + JWT |
+| **核心功能** | 用户认证、三级订阅、AI 工具集 API、在线游戏体验馆 |
+| **开发方式** | Cortx Agent (代码生成) + LingClaw ADE (IDE 可视化) 协同开发 |
+| **人工干预** | 仅需求描述，编码全自动化 |
+
+👉 **查看完整项目代码**: [github.com/CHNAICORP/gamespark](https://github.com/CHNAICORP/gamespark)
+
 ---
 
 ## 设计哲学

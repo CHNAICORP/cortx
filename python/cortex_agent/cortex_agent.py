@@ -1263,7 +1263,7 @@ class CortexAgent:
                     ok, reason = False, f"工具 {name} 不在白名单中"
                 elif self._disallowed_tools and name in self._disallowed_tools:
                     ok, reason = False, f"工具 {name} 已被黑名单禁止"
-                elif cap and cap in self._suspended_capabilities:
+                elif cap and cap in self._suspended_capabilities and self.config.permission_mode != "yolo":
                     ok, reason = False, f"能力 {cap.value} 已被暂停"
                 else:
                     ok, reason = self.policy.audit(name, args)
@@ -1279,11 +1279,15 @@ class CortexAgent:
                 # ── Adaptive Guard: track rejections ──
                 if not ok:
                     if cap and "用户" not in reason:
-                        self._rejection_counts[cap] = self._rejection_counts.get(cap, 0) + 1
-                        cnt = self._rejection_counts[cap]
-                        if cnt >= 3:
-                            self._suspended_capabilities.add(cap)
-                            result = f"(x) [Policy 拦截] {cap.value} 能力已被暂停（连续 {cnt} 次违规），本次会话中不可用。"
+                        # yolo 模式不累计拒绝计数，不暂停能力
+                        if self.config.permission_mode != "yolo":
+                            self._rejection_counts[cap] = self._rejection_counts.get(cap, 0) + 1
+                            cnt = self._rejection_counts[cap]
+                            if cnt >= 5:
+                                self._suspended_capabilities.add(cap)
+                                result = f"(x) [Policy 拦截] {cap.value} 能力已被暂停（连续 {cnt} 次违规），本次会话中不可用。"
+                            else:
+                                result = f"(x) [Policy 拦截] {reason}"
                         else:
                             result = f"(x) [Policy 拦截] {reason}"
                     else:

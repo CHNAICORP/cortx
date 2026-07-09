@@ -242,7 +242,8 @@ export class LLMProvider {
     return {
       calls: this.callCount,
       cacheHits: this.cacheHits,
-      hitRate: this.callCount > 0 ? (this.cacheHits / this.callCount) * 100 : 0,
+      // 正确的平均缓存命中率 = 已缓存 token / 总输入 token
+      hitRate: this.totalInputTokens > 0 ? (this.totalCachedTokens / this.totalInputTokens) * 100 : 0,
       totalInputTokens: this.totalInputTokens,
       totalCachedTokens: this.totalCachedTokens,
     };
@@ -429,6 +430,8 @@ export class LLMProvider {
     let finishReason = "";
     let currentBlockType = "";
     let currentBlockIdx = -1;
+    let anthropicInputTokens = 0;
+    let anthropicCachedTokens = 0;
 
     if (!reader) return { text: "", toolCalls: null, reasoning: "", finishReason };
 
@@ -486,9 +489,18 @@ export class LLMProvider {
             }
           } else if (etype === "content_block_stop") {
             currentBlockType = "";
+          } else if (etype === "message_start") {
+            // Anthropic message_start 包含 input_tokens 和 cache_read_input_tokens
+            const usage = evt.message?.usage || evt.usage || {};
+            anthropicInputTokens = (usage.input_tokens as number) || 0;
+            anthropicCachedTokens = (usage.cache_read_input_tokens as number) || 0;
           } else if (etype === "message_delta") {
             const delta = evt.delta || {};
             if (delta.stop_reason) finishReason = delta.stop_reason;
+            // message_delta 可能包含更新后的 usage
+            const usage = evt.usage || {};
+            if (usage.input_tokens) anthropicInputTokens = usage.input_tokens;
+            if (usage.cache_read_input_tokens) anthropicCachedTokens = usage.cache_read_input_tokens;
           } else if (etype === "message_stop") {
             // stream complete
           }
@@ -497,8 +509,16 @@ export class LLMProvider {
     }
 
     this.callCount++;
-    const totalChars = messages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
-    this.totalInputTokens += Math.floor(totalChars * 0.4);
+    // 使用 Anthropic 流式返回的实际 token 数
+    if (anthropicInputTokens > 0) {
+      this.totalInputTokens += anthropicInputTokens;
+      this.totalCachedTokens += anthropicCachedTokens;
+      if (anthropicCachedTokens > 0) this.cacheHits++;
+    } else {
+      // fallback：估算
+      const totalChars = messages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
+      this.totalInputTokens += Math.floor(totalChars * 0.4);
+    }
 
     const text = textParts.join("");
     const reasoning = reasoningParts.join("");
@@ -610,6 +630,7 @@ export class LLMProvider {
     let reasoningDone = false;
     let toolSeen = false;
     let finishReason = "";
+    let streamUsage: Record<string, unknown> | null = null;
 
     if (!reader) return { text: "", toolCalls: null, reasoning: "", finishReason };
 
@@ -628,6 +649,8 @@ export class LLMProvider {
         if (data === "[DONE]") continue;
         try {
           const parsed = JSON.parse(data);
+          // 提取 usage 信息（通常在最后一个 chunk）
+          if (parsed.usage) streamUsage = parsed.usage;
           const choice = parsed.choices?.[0];
           if (choice?.finish_reason) finishReason = choice.finish_reason;
           const delta = choice?.delta;
@@ -661,6 +684,8 @@ export class LLMProvider {
       if (data !== "[DONE]") {
         try {
           const parsed = JSON.parse(data);
+          // 提取 usage 信息（通常在最后一个 chunk）
+          if (parsed.usage) streamUsage = parsed.usage;
           const choice = parsed.choices?.[0];
           if (choice?.finish_reason) finishReason = choice.finish_reason;
           const delta = choice?.delta;
@@ -688,8 +713,18 @@ export class LLMProvider {
     }
 
     this.callCount++;
-    const totalChars = messages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
-    this.totalInputTokens += Math.floor(totalChars * 0.4);
+    // 如果流式响应包含 usage 信息，使用实际 token 数；否则用估算
+    if (streamUsage) {
+      const usage = streamUsage as Record<string, unknown>;
+      this.totalInputTokens += (usage.prompt_tokens as number) || 0;
+      const details = usage.prompt_tokens_details as Record<string, unknown> | undefined;
+      const cached = (details?.cached_tokens as number) || 0;
+      this.totalCachedTokens += cached;
+      if (cached > 0) this.cacheHits++;
+    } else {
+      const totalChars = messages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
+      this.totalInputTokens += Math.floor(totalChars * 0.4);
+    }
 
     const text = textParts.join("");
     const reasoning = reasoningParts.join("");

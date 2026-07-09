@@ -1124,7 +1124,7 @@ this._skillMgr = new SkillManager(this.config.workDir);
           ok = false; reason = `工具 ${tc.name} 不在白名单中`;
         } else if (this._disallowedTools && this._disallowedTools.has(tc.name)) {
           ok = false; reason = `工具 ${tc.name} 已被黑名单禁止`;
-        } else if (cap && this.suspendedCaps.has(cap)) {
+        } else if (cap && this.suspendedCaps.has(cap) && this.config.permissionMode !== "yolo") {
           ok = false; reason = `能力 ${cap} 已被暂停`;
         } else {
           [ok, reason] = await this.policy.audit(tc.name, tc.args);
@@ -1142,11 +1142,16 @@ this._skillMgr = new SkillManager(this.config.workDir);
           }
         }
         if (!ok && cap && !reason.includes("用户")) {
-          const cnt = (this.rejectionCounts.get(cap) || 0) + 1;
-          this.rejectionCounts.set(cap, cnt);
-          if (cnt >= 3) {
-            this.suspendedCaps.add(cap);
-            reason = `(x) [Policy 拦截] ${cap} 能力已被暂停（连续 ${cnt} 次违规）`;
+          // yolo 模式不累计拒绝计数，不暂停能力
+          if (this.config.permissionMode !== "yolo") {
+            const cnt = (this.rejectionCounts.get(cap) || 0) + 1;
+            this.rejectionCounts.set(cap, cnt);
+            if (cnt >= 5) {
+              this.suspendedCaps.add(cap);
+              reason = `(x) [Policy 拦截] ${cap} 能力已被暂停（连续 ${cnt} 次违规）`;
+            } else {
+              reason = `(x) [Policy 拦截] ${reason}`;
+            }
           } else {
             reason = `(x) [Policy 拦截] ${reason}`;
           }
