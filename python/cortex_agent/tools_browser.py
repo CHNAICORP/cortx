@@ -94,26 +94,81 @@ def _get_browser_ws() -> str:
 def browser_navigate(work_dir: str, url: str) -> str:
     ws = _get_browser_ws()
     if not ws:
-        return "(x) 浏览器自动启动失败。请手动启动: start msedge --remote-debugging-port=9222"
-    import http.client
+        return "(x) 浏览器自动启动失败。请手动启动: start msedge --remote-debugging-port=9222 --user-data-dir=%TEMP%\\cortex-browser-profile"
+    import http.client, time as _time
     try:
         conn = http.client.HTTPConnection("127.0.0.1", 9222, timeout=10)
-        # 获取可用的页面列表
+        # 1. 获取已有页面列表
         conn.request("GET", "/json")
         resp = conn.getresponse()
         pages = json.loads(resp.read().decode())
         conn.close()
-        # 在新页面中导航
-        conn = http.client.HTTPConnection("127.0.0.1", 9222, timeout=10)
-        conn.request("PUT", "/json/new?" + urllib.parse.urlencode({"url": url}))
-        resp = conn.getresponse()
-        page_info = json.loads(resp.read().decode())
-        conn.close()
-        title = page_info.get("title", "?")
-        ws_url = page_info.get("webSocketDebuggerUrl", "")
-        return f"已在浏览器中打开: {url}\n标题: {title}\nWebSocket: {ws_url[:60]}..."
+
+        target_page = None
+        if isinstance(pages, list) and pages:
+            # 找到第一个 type=page 的标签页
+            for p in pages:
+                if p.get("type") == "page" and p.get("webSocketDebuggerUrl"):
+                    target_page = p
+                    break
+
+        # 2. 如果没有可用页面，创建新标签页（不带 URL 参数，避免不同浏览器版本的兼容性问题）
+        if not target_page:
+            try:
+                conn = http.client.HTTPConnection("127.0.0.1", 9222, timeout=10)
+                conn.request("PUT", "/json/new")
+                resp = conn.getresponse()
+                new_page = json.loads(resp.read().decode())
+                conn.close()
+                if new_page and new_page.get("webSocketDebuggerUrl"):
+                    target_page = new_page
+                    # 等待页面初始化
+                    _time.sleep(0.5)
+            except Exception:
+                pass  # some browsers don't support PUT /json/new
+
+        if not target_page or not target_page.get("webSocketDebuggerUrl"):
+            return "(x) 无法获取浏览器页面 WebSocket。请确认浏览器已启动: start msedge --remote-debugging-port=9222 --user-data-dir=%TEMP%\\cortex-browser-profile"
+
+        # 3. 通过 CDP WebSocket 发送 Page.navigate 命令（可靠导航，兼容所有浏览器版本）
+        cdp_cmd = json.dumps({
+            "id": 1,
+            "method": "Page.navigate",
+            "params": {"url": url},
+        })
+        result_raw = _cdp_ws_send(target_page["webSocketDebuggerUrl"], cdp_cmd, timeout=10.0)
+
+        if not result_raw:
+            return f"(x) CDP 导航无响应。URL: {url}"
+
+        result = json.loads(result_raw)
+        nav_result = result.get("result", {})
+
+        if nav_result.get("errorText"):
+            return f"(x) 导航失败: {nav_result['errorText']}\nURL: {url}"
+
+        # 等待页面加载
+        _time.sleep(1.0)
+
+        # 4. 获取导航后的页面信息
+        title = "?"
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", 9222, timeout=5)
+            conn.request("GET", "/json")
+            resp = conn.getresponse()
+            updated_pages = json.loads(resp.read().decode())
+            conn.close()
+            if isinstance(updated_pages, list):
+                for p in updated_pages:
+                    if p.get("webSocketDebuggerUrl") == target_page["webSocketDebuggerUrl"]:
+                        title = p.get("title", "?")
+                        break
+        except Exception:
+            pass
+
+        return f"已在浏览器中导航到: {url}\n页面标题: {title}"
     except Exception as e:
-        return f"(x) 浏览器错误: {e}\n请确认浏览器已启动: start msedge --remote-debugging-port=9222"
+        return f"(x) 浏览器错误: {e}\n请确认浏览器已启动: start msedge --remote-debugging-port=9222 --user-data-dir=%TEMP%\\cortex-browser-profile"
 
 
 @registry.register(
