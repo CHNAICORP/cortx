@@ -280,23 +280,34 @@ def create_default_settings(path: str) -> dict:
         # ── Memory 注入控制 ──
         "memory_inject_count": 30,
         "mcpServers": {
-            "playwright": {
-                "command": "npx",
-                "args": ["-y", "@playwright/mcp@latest"],
-                "description": "浏览器自动化（Microsoft 官方）"
-            },
             "fetch": {
                 "command": "python",
                 "args": ["-m", "mcp_server_fetch"],
                 "description": "HTTP 抓取 + HTML→Markdown"
             },
-            "sqlite": {
+            "memory": {
                 "command": "npx",
-                "args": ["-y", "@modelcontextprotocol/server-sqlite"],
-                "description": "SQLite 数据库查询"
+                "args": ["-y", "@modelcontextprotocol/server-memory"],
+                "description": "持久化知识图谱记忆系统"
+            },
+            "sequential-thinking": {
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+                "description": "多步推理与思维链增强"
+            },
+            "filesystem": {
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+                "description": "安全文件系统操作 — 读写/列表/搜索"
+            },
+            "sqlite": {
+                "command": "uvx",
+                "args": ["mcp-server-sqlite", "--db-path", "agent.db"],
+                "description": "SQLite 数据库查询（官方 Python 实现）"
             },
             "context7": {
-                "url": "https://mcp.context7.com/mcp",
+                "command": "npx",
+                "args": ["-y", "@upstash/context7-mcp"],
                 "description": "实时库/框架文档查询"
             }
         }
@@ -389,24 +400,36 @@ def create_default_settings(path: str) -> dict:
   "tool_timeout": 0,                          // 0=不设置超时
   
   // ── MCP 服务器配置 ──
+  // 这 6 个纯软件可跑的 MCP 默认启用，其他 12 个通过 mcp_install(server="xxx") 按需安装
   "mcpServers": {
-    "playwright": {
-      "command": "npx",
-      "args": ["-y", "@playwright/mcp@latest"],
-      "description": "浏览器自动化（Microsoft 官方）"
-    },
     "fetch": {
-      "command": "python",
+      "command": "python",                     // 需 pip install mcp-server-fetch
       "args": ["-m", "mcp_server_fetch"],
       "description": "HTTP 抓取 + HTML→Markdown"
     },
-    "sqlite": {
+    "memory": {
+      "command": "npx",                        // 需 Node.js
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "description": "持久化知识图谱记忆系统"
+    },
+    "sequential-thinking": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-sqlite"],
-      "description": "SQLite 数据库查询"
+      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+      "description": "多步推理与思维链增强"
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+      "description": "安全文件系统操作 — 读写/列表/搜索"
+    },
+    "sqlite": {
+      "command": "uvx",                        // 需 uv (pip install uv)
+      "args": ["mcp-server-sqlite", "--db-path", "agent.db"],
+      "description": "SQLite 数据库查询（官方 Python 实现）"
     },
     "context7": {
-      "url": "https://mcp.context7.com/mcp",
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp"],
       "description": "实时库/框架文档查询"
     }
   }

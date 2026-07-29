@@ -23,6 +23,7 @@ async function loadTools(): Promise<void> {
   await import("../tools/proxy.js");
   await import("../tools/subagent.js");
   await import("../tools/git.js");
+await import("../tools/office.js");
   console.error(`[cortex] ${registry.schemaList.length} tools loaded`);
 }
 

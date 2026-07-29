@@ -25,7 +25,33 @@ from . import tools_browser as _
 from . import tools_computer as _
 from . import tools_network as _
 from . import tools_rag as _
+from . import tools_office as _
 del _
+
+
+def check_mcp_runtimes(verbose: bool = False) -> list:
+    """检测 MCP 运行时依赖（npx/uvx/python），返回缺失项列表。
+    
+    verbose=True 时同时打印提示信息。
+    """
+    import shutil as _sh
+    missing = []
+    has_npx = _sh.which("npx") is not None
+    has_uvx = _sh.which("uvx") is not None
+    has_python = _sh.which("python") is not None or sys.executable
+    if not has_npx:
+        missing.append("Node.js (npx) — 必需，11 个 MCP 依赖它（playwright/filesystem/memory/puppeteer/chrome-devtools 等）")
+    if not has_uvx:
+        missing.append("uv (uvx) — 必需，3 个 MCP 依赖它（sqlite/fetch/blender-mcp）")
+    if not has_python:
+        missing.append("Python — 必需，fetch MCP 依赖它")
+    if verbose and missing:
+        print(f"\n  ⚠️  MCP 运行时缺失:")
+        for m in missing:
+            print(f"      • {m}")
+        print(f"      安装后 {18 - len(missing)} 个 MCP 可用，详见 mcp_registry()")
+        print(f"      安装命令: Node.js → https://nodejs.org | uv → pip install uv\n")
+    return missing
 
 
 def create_agent(model: str = None, work_dir: str = None, api_key: str = None,
@@ -441,6 +467,10 @@ def main():
     if args.mode:
         agent.config.permission_mode = args.mode
     wd = agent.work_dir
+
+    # ── MCP 运行时检测（交互式启动时提示缺失依赖）──
+    if not args.query and not args.pipe:
+        check_mcp_runtimes(verbose=True)
 
     # ── 加载 Hooks 配置 ──
     agent.hooks.load_from_config(settings)

@@ -589,6 +589,35 @@ this._skillMgr = new SkillManager(this.config.workDir);
     this._disallowedTools = disallowed ? new Set(disallowed) : null;
   }
 
+  /**
+   * 根据用户查询内容自动注入相关技能到上下文。
+   * 当检测到 Office 相关关键词时，注入对应的设计技能。
+   */
+  private _autoInjectSkills(query: string): void {
+    if (!this._skillMgr) return;
+    const lowerQuery = query.toLowerCase();
+    // 检测 Office 相关关键词
+    const officeKeywords: Record<string, string[]> = {
+      'officecli-pptx': ['.pptx', 'pptx', 'powerpoint', 'ppt', '幻灯片', '演示文稿', 'slides', 'deck'],
+      'officecli-xlsx': ['.xlsx', 'xlsx', 'excel', '电子表格', '工作表', 'spreadsheet', 'workbook'],
+      'officecli-docx': ['.docx', 'docx', 'word', '文档', '报告', 'document', 'report', 'memo'],
+    };
+    const injected = new Set<string>();
+    for (const [skillName, keywords] of Object.entries(officeKeywords)) {
+      if (keywords.some(kw => lowerQuery.includes(kw))) {
+        const skill = this._skillMgr.get(skillName);
+        if (skill && !injected.has(skillName)) {
+          // 注入技能 prompt 作为 system 消息（在用户消息之前）
+          const prompt = skill.toPrompt();
+          // 只注入前 4000 字符避免上下文膨胀
+          const truncated = prompt.length > 4000 ? prompt.slice(0, 4000) + '\n...(技能内容已截断，完整内容请用 /skill 查看)' : prompt;
+          this.ctx.push({ role: 'system', content: truncated });
+          injected.add(skillName);
+        }
+      }
+    }
+  }
+
   /** 获取 HookManager */
   get hooks(): HookManager {
     return this._hooks;
@@ -753,6 +782,8 @@ this._skillMgr = new SkillManager(this.config.workDir);
     } else {
       this.ctx = this.governor.appendUser(this.ctx, query);
     }
+    // ── Auto-inject relevant skills based on user query ──
+    this._autoInjectSkills(query);
     const result = await this._loop(maxSteps || this.config.maxSteps);
     this.queryCount++;
     this.stepCountTotal += this.trace?.steps.length || 0;

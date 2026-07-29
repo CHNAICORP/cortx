@@ -885,11 +885,35 @@ class CortexAgent:
             self.governor = self._make_governor(summary_sid)
         return sid
 
+    def _auto_inject_skills(self, query: str):
+        """根据用户查询内容自动注入相关技能到上下文。"""
+        if not self.skill_mgr:
+            return
+        lower_query = query.lower()
+        office_keywords = {
+            'officecli-pptx': ['.pptx', 'pptx', 'powerpoint', 'ppt', '幻灯片', '演示文稿', 'slides', 'deck'],
+            'officecli-xlsx': ['.xlsx', 'xlsx', 'excel', '电子表格', '工作表', 'spreadsheet', 'workbook'],
+            'officecli-docx': ['.docx', 'docx', 'word', '文档', '报告', 'document', 'report', 'memo'],
+        }
+        injected = set()
+        for skill_name, keywords in office_keywords.items():
+            if any(kw in lower_query for kw in keywords):
+                skill = self.skill_mgr.get(skill_name)
+                if skill and skill_name not in injected:
+                    prompt = skill.to_prompt()
+                    # 只注入前 4000 字符避免上下文膨胀
+                    if len(prompt) > 4000:
+                        prompt = prompt[:4000] + '\n...(技能内容已截断，完整内容请用 /skill 查看)'
+                    self._ctx.append({"role": "system", "content": prompt})
+                    injected.add(skill_name)
+
     def run(self, query: str, max_steps: int = None, keep_history: bool = False) -> str:
         if not keep_history or not self._ctx:
             self._ctx = self.governor.init(query)
         else:
             self._ctx = self.governor.append_user(self._ctx, query)
+        # ── Auto-inject relevant skills based on user query ──
+        self._auto_inject_skills(query)
         result = self._loop(max_steps or self.config.max_steps)
         # ── Post-loop: auto-save + auto-extract ──
         self._query_count += 1

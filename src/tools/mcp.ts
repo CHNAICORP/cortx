@@ -21,18 +21,20 @@ export const MCP_REGISTRY: Record<string, McpRegistryEntry> = {
   playwright: { name: "Playwright MCP", desc: "浏览器自动化（Microsoft 官方）— 页面导航/截图/表单填写/数据提取", category: "browser", install: ["npx", "-y", "@playwright/mcp@latest"], requires: "node" },
   fetch: { name: "Fetch MCP", desc: "HTTP 抓取 + HTML→Markdown 转换，适合网页内容提取", category: "network", install: ["pip", "install", "mcp-server-fetch"], requires: "python" },
   filesystem: { name: "Filesystem MCP", desc: "安全文件系统操作 — 读写/列表/搜索（可限制目录范围）", category: "filesystem", install: ["npx", "-y", "@modelcontextprotocol/server-filesystem"], requires: "node" },
-  sqlite: { name: "SQLite MCP", desc: "本地 SQLite 数据库查询与分析", category: "database", install: ["npx", "-y", "@modelcontextprotocol/server-sqlite"], requires: "node" },
+  sqlite: { name: "SQLite MCP", desc: "本地 SQLite 数据库查询与分析（官方 Python 实现，原 npm 包已下架）", category: "database", install: ["uvx", "mcp-server-sqlite", "--db-path", "agent.db"], requires: "python" },
   postgres: { name: "PostgreSQL MCP", desc: "PostgreSQL 只读查询 — Schema 检查 + SQL 执行", category: "database", install: ["npx", "-y", "@modelcontextprotocol/server-postgres"], requires: "node" },
   "chrome-devtools": { name: "Chrome DevTools MCP", desc: "Chrome DevTools 协议直连 — 性能分析/调试/截图/DOM 操作", category: "browser", install: ["npx", "-y", "chrome-devtools-mcp@latest"], requires: "node" },
   docker: { name: "Docker MCP", desc: "Docker 容器与镜像管理", category: "infra", install: ["npx", "-y", "@cpecf/docker-mcp"], requires: "node" },
-  context7: { name: "Context7", desc: "实时库/框架文档查询 — 解决 LLM 知识截止问题", category: "knowledge", install: [], requires: "none", url: "https://mcp.context7.com/mcp" },
+  context7: { name: "Context7", desc: "实时库/框架文档查询 — 解决 LLM 知识截止问题（推荐 npx -y @upstash/context7-mcp stdio 模式）", category: "knowledge", install: ["npx", "-y", "@upstash/context7-mcp"], requires: "node", url: "https://mcp.context7.com/mcp" },
   github: { name: "GitHub MCP", desc: "GitHub PR/Issue/代码搜索/仓库管理", category: "devtools", install: [], requires: "github_token", url: "https://api.githubcopilot.com/mcp/" },
   slack: { name: "Slack MCP", desc: "Slack 频道消息发送/文件上传/工作流", category: "communication", install: ["npx", "-y", "@modelcontextprotocol/server-slack"], requires: "slack_token" },
   memory: { name: "Memory MCP", desc: "持久化知识图谱记忆系统", category: "knowledge", install: ["npx", "-y", "@modelcontextprotocol/server-memory"], requires: "node" },
   "brave-search": { name: "Brave Search MCP", desc: "Brave Search API 联网搜索（需 API Key）", category: "network", install: ["npx", "-y", "@modelcontextprotocol/server-brave-search"], requires: "brave_api_key" },
-  puppeteer: { name: "Puppeteer MCP", desc: "Puppeteer 浏览器自动化 — 轻量级网页交互", category: "browser", install: ["npx", "-y", "@modelcontextprotocol/server-puppeteer"], requires: "node" },
+  puppeteer: { name: "Puppeteer MCP", desc: "Puppeteer 浏览器自动化 — 轻量级网页交互（推荐设置 PUPPETEER_EXECUTABLE_PATH 指向系统 Chrome 避免下载 Chromium）", category: "browser", install: ["npx", "-y", "@modelcontextprotocol/server-puppeteer"], requires: "node" },
   everart: { name: "EverArt MCP", desc: "AI 图像生成（通过 EverArt API）", category: "media", install: ["npx", "-y", "@modelcontextprotocol/server-everart"], requires: "everart_api_key" },
   "sequential-thinking": { name: "Sequential Thinking MCP", desc: "多步推理与思维链增强", category: "reasoning", install: ["npx", "-y", "@modelcontextprotocol/server-sequential-thinking"], requires: "node" },
+  "cua-driver": { name: "CUA Driver", desc: "后台桌面控制 MCP server（Rust v0.8.3 跨平台）— 截图/点击/键盘/拖拽/滚动/应用管理，不抢占光标", category: "computer", install: ["cua-driver", "mcp"], requires: "node" },
+  officecli: { name: "OfficeCLI MCP", desc: "Office 文档操作 MCP — 创建/编辑 Word(.docx) Excel(.xlsx) PowerPoint(.pptx)，通过命名管道高性能通信，首次自动安装", category: "office", install: ["officecli", "mcp"], requires: "none" },
 };
 
 // ── Windows command resolution ──
@@ -48,7 +50,7 @@ function resolveCommand(cmd: string[]): string[] {
 }
 
 // ── MCP JSON-RPC exchange ──
-export function mcpExchange(serverCmd: string[], requests: string[], timeout = 30000): Promise<any[]> {
+export function mcpExchange(serverCmd: string[], requests: string[], timeout = 90000): Promise<any[]> {
   return new Promise((resolve, reject) => {
     const resolvedCmd = resolveCommand([...serverCmd]);
     const proc = spawn(resolvedCmd[0], resolvedCmd.slice(1), {
@@ -179,7 +181,7 @@ registry.register(
       lines.push(`\n=== 注册表可用 (${Object.keys(available).length} 个，未安装) ===\n`);
       for (const [key, info] of Object.entries(available)) {
         const req = info.requires;
-        const icon = { none: "🟢", node: "🟡", python: "🟡" }[req] || "🔑";
+        const icon = { none: "🟢", node: "🟡", python: "🟡", cua_driver: "🟡", blender: "🟡" }[req] || "🔑";
         lines.push(`  ${icon} ${key.padEnd(20)} — ${info.desc.slice(0, 55)}`);
       }
     }
@@ -233,6 +235,22 @@ registry.register(
       const notified = JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" });
       const callReq = JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: toolName, arguments: argsDict } });
       const responses = await mcpExchange(cmd, [init, notified, callReq]);
+      // 优先返回 id=2 的响应（工具调用结果），含 error 也要返回
+      for (let i = responses.length - 1; i >= 0; i--) {
+        const msg = responses[i];
+        if (msg.id === 2) {
+          if (msg.error) return `(x) MCP 工具错误: ${msg.error.message || JSON.stringify(msg.error)}`;
+          if (msg.result) {
+            const content = msg.result.content;
+            if (Array.isArray(content)) {
+              const texts = content.filter((c: any) => c.text).map((c: any) => c.text);
+              if (texts.length) return texts.join("\n").slice(0, 3000);
+            }
+            return JSON.stringify(msg.result).slice(0, 3000);
+          }
+        }
+      }
+      // 回退：任意含 result 的响应
       for (let i = responses.length - 1; i >= 0; i--) {
         const msg = responses[i];
         if (msg.result) {
@@ -275,7 +293,7 @@ registry.register(
       lines.push(`  [${c}]`);
       for (const [key, info] of byCat[c]) {
         const req = info.requires;
-        const icon = { none: "🟢", node: "🟡", python: "🟡" }[req] || "🔑";
+        const icon = { none: "🟢", node: "🟡", python: "🟡", cua_driver: "🟡", blender: "🟡" }[req] || "🔑";
         lines.push(`  ${icon} ${key.padEnd(20)} — ${info.desc.slice(0, 60)}`);
         if (!["none", "node", "python"].includes(req)) {
           lines.push(`     ${" ".repeat(22)} 需要: ${req}`);

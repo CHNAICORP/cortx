@@ -144,32 +144,67 @@ export class SkillManager {
     if (!path.isAbsolute(dir)) dir = path.join(this.projectDir, dir);
     if (!fs.existsSync(dir)) return;
     try {
-      for (const fn of fs.readdirSync(dir)) {
-        if (!fn.endsWith(".md")) continue;
-        const fpath = path.join(dir, fn);
+      this._scanSkillsDir(dir);
+    } catch { /* ignore */ }
+  }
+
+  /** Recursively scan for SKILL.md / *.md files in subdirectories */
+  private _scanSkillsDir(dir: string): void {
+    for (const fn of fs.readdirSync(dir)) {
+      const fpath = path.join(dir, fn);
+      let stat: fs.Stats;
+      try { stat = fs.statSync(fpath); } catch { continue; }
+      if (stat.isDirectory()) {
+        // Recurse into subdirectory (e.g. officecli/SKILL.md)
+        this._scanSkillsDir(fpath);
+      } else if (fn.endsWith(".md")) {
         try {
           const skill = this._parseSkillFile(fpath);
           if (skill && !this.skills.has(skill.name)) this.skills.set(skill.name, skill);
         } catch { /* skip malformed */ }
       }
-    } catch { /* ignore */ }
+    }
   }
 
   private _parseSkillFile(fpath: string): Skill | null {
     const content = fs.readFileSync(fpath, "utf-8");
     const lines = content.split("\n");
+    // Use parent directory name as skill name when file is SKILL.md
     let name = path.basename(fpath, ".md");
+    if (name === "SKILL") name = path.basename(path.dirname(fpath));
     let description = "";
     let category = "custom";
     let promptStart = 0;
-    for (let i = 0; i < lines.length; i++) {
+    // Support YAML front matter (--- name: ... ---) used by officecli skills
+    if (lines.length > 0 && lines[0].trim() === "---") {
+      // Find closing ---
+      let endYaml = -1;
+      for (let i = 1; i < lines.length; i++) {
+        if (lines[i].trim() === "---") { endYaml = i; break; }
+      }
+      if (endYaml > 0) {
+        // Parse YAML front matter
+        for (let i = 1; i < endYaml; i++) {
+          const line = lines[i];
+          const m = line.match(/^(\w+):\s*"?(.*?)"?\s*$/);
+          if (m) {
+            if (m[1] === "name") name = m[2];
+            else if (m[1] === "description") description = m[2];
+          }
+        }
+        promptStart = endYaml + 1;
+      }
+    }
+    // Also support legacy format
+    for (let i = promptStart; i < lines.length; i++) {
       const line = lines[i];
-      if (i === 0 && line.startsWith("# ")) name = line.slice(2).trim();
+      if (i === promptStart && line.startsWith("# ") && !name) name = line.slice(2).trim();
       else if (line.startsWith("> ")) description = line.slice(2).trim();
       else if (line.startsWith("[category:")) {
         const m = line.match(/\[category:\s*(.+?)\s*\]/);
         if (m) category = m[1];
       } else if (line.trim() === "---") { promptStart = i + 1; break; }
+      else break; // stop at first non-metadata line
     }
     let prompt = lines.slice(promptStart).join("\n").trim();
     if (!prompt) prompt = content;

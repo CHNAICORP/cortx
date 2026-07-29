@@ -142,41 +142,67 @@ class SkillManager:
         self.skills.update(builtins)
 
     def _load_from_disk(self):
-        """从 SKILLS_DIR 加载自定义技能（支持相对/绝对路径）。"""
+        """从 SKILLS_DIR 加载自定义技能（支持相对/绝对路径，递归子目录）。"""
         skills_dir = self.SKILLS_DIR
         if not os.path.isabs(skills_dir):
             skills_dir = os.path.join(self.project_dir, skills_dir)
         if not os.path.isdir(skills_dir):
             return
-        for fpath in _glob.glob(os.path.join(skills_dir, "*.md")):
-            try:
-                skill = self._parse_skill_file(fpath)
-                if skill and skill.name not in self.skills:
-                    self.skills[skill.name] = skill
-            except Exception:
-                pass
+        self._scan_skills_dir(skills_dir)
+
+    def _scan_skills_dir(self, dir_path: str):
+        """递归扫描目录及子目录中的 .md / SKILL.md 文件。"""
+        for entry in os.listdir(dir_path):
+            fpath = os.path.join(dir_path, entry)
+            if os.path.isdir(fpath):
+                self._scan_skills_dir(fpath)
+            elif entry.endswith('.md'):
+                try:
+                    skill = self._parse_skill_file(fpath)
+                    if skill and skill.name not in self.skills:
+                        self.skills[skill.name] = skill
+                except Exception:
+                    pass
 
     def _parse_skill_file(self, fpath: str) -> Optional[Skill]:
         """解析 SKILL.md 格式的技能文件
         
-        格式:
-          # Skill Name
-          > description
-          
-          [category: xxx]
-          
-          ---
-          prompt content...
+        支持两种格式:
+        1. YAML front matter (--- name: ... ---) — officecli skills 使用
+        2. 旧格式: # Title / > description / [category: xxx] / --- / prompt
         """
         with open(fpath, 'r', encoding='utf-8') as f:
             content = f.read()
         lines = content.split('\n')
+        # SKILL.md 文件用父目录名作为 skill name
         name = os.path.splitext(os.path.basename(fpath))[0]
+        if name == 'SKILL':
+            name = os.path.basename(os.path.dirname(fpath))
         description = ""
         category = "custom"
         prompt_start = 0
-        for i, line in enumerate(lines):
-            if i == 0 and line.startswith('# '):
+        
+        # 支持 YAML front matter
+        if lines and lines[0].strip() == '---':
+            end_yaml = -1
+            for i in range(1, len(lines)):
+                if lines[i].strip() == '---':
+                    end_yaml = i
+                    break
+            if end_yaml > 0:
+                for i in range(1, end_yaml):
+                    m = re.match(r'^(\w+):\s*"?(.*?)"?\s*$', lines[i])
+                    if m:
+                        if m.group(1) == 'name':
+                            name = m.group(2)
+                        elif m.group(1) == 'description':
+                            description = m.group(2)
+                prompt_start = end_yaml + 1
+        
+        # 也支持旧格式
+        for i in range(prompt_start, len(lines)):
+            line = lines[i]
+            if i == prompt_start and line.startswith('# ') and not name:
                 name = line[2:].strip()
             elif line.startswith('> '):
                 description = line[2:].strip()
@@ -185,9 +211,12 @@ class SkillManager:
             elif line.strip() == '---':
                 prompt_start = i + 1
                 break
+            else:
+                break
+        
         prompt = '\n'.join(lines[prompt_start:]).strip()
         if not prompt:
-            prompt = content  # 如果没找到分隔符，整个文件作为 prompt
+            prompt = content
         return Skill(name=name, description=description, prompt=prompt,
                      category=category, filepath=fpath)
 
