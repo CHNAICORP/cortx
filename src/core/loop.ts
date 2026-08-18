@@ -639,6 +639,7 @@ this._skillMgr = new SkillManager(this.config.workDir);
       model: model ? LLMProvider.resolve(model) : this.config.model,
       maxSteps: 0,
       maxRounds: 1,
+      thinkTimeout: Math.max(this.config.thinkTimeout || 600, 180), // 子代理并行时API响应慢，至少180s
     };
     const subAgent = new CortexAgent(subConfig);
     subAgent._nonInteractive = true;
