@@ -788,57 +788,41 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
         except Exception:
             pass
 
-    # ── Bing CN (双语搜索：中文优先，结果不足时自动英文补充) ──
+    # ── Bing (ensearch=1 对中英文搜索质量都最好) ──
     if not raw_results:
-        def _bing_search(search_url):
-            """单次 Bing 搜索，返回结果列表。"""
-            try:
-                req = urllib.request.Request(search_url, headers={"User-Agent": USER_AGENT_SHORT})
-                with opener.open(req, timeout=8) as r:
-                    html = r.read().decode("utf-8", errors="ignore")
-                block_re = re.compile(r'<li[^>]*class="b_algo"[^>]*>([\s\S]*?)</li>', re.IGNORECASE)
-                items = []
-                for bm in block_re.finditer(html):
-                    if len(items) >= n:
-                        break
-                    block = bm.group(1)
-                    h2 = re.search(r'<h2[^>]*><a[^>]*>(.*?)</a>', block, re.IGNORECASE)
-                    title = re.sub(r'<[^>]+>', '', h2.group(1)).strip().replace('&amp;', '&') if h2 else ""
-                    cite = re.search(r'<cite[^>]*>(.*?)</cite>', block, re.IGNORECASE)
-                    raw_url = re.sub(r'<[^>]+>', '', cite.group(1)).strip() if cite else ""
-                    raw_url_clean = raw_url.split('›')[0].strip().replace(' ', '')
-                    url = raw_url_clean if raw_url_clean.startswith('http') else 'https://' + raw_url_clean
-                    full_text = re.sub(r'<[^>]+>', ' ', block)
-                    full_text = full_text.replace('&ensp;', ' ').replace('&#0183;', ' • ').replace('&amp;', '&')
-                    full_text = full_text.replace('&nbsp;', ' ').replace('&quot;', '"').replace('&#39;', "'")
-                    full_text = re.sub(r'\s+', ' ', full_text).strip()
-                    snippet = full_text
-                    if title:
-                        snippet = snippet.replace(title, '').strip()
-                    if raw_url:
-                        snippet = snippet.replace(raw_url, '').strip()
-                    if len(snippet) > 600:
-                        snippet = snippet[:600] + ' [...]'
-                    if title and url:
-                        items.append({"title": title, "url": url, "snippet": snippet})
-                return items
-            except Exception:
-                return []
-
-        has_cjk = bool(re.search(r'[\u4e00-\u9fff\u3040-\u30ff]', query))
-        # 第一次：中文用 setlang=zh-CN（避免返回英文通用列表页），英文用 ensearch=1
-        url1 = (f"https://cn.bing.com/search?q={encoded}&setlang=zh-CN" if has_cjk
-                else f"https://cn.bing.com/search?q={encoded}&ensearch=1&setlang=en")
-        raw_results = _bing_search(url1)
-        engine_used = "Bing"
-        # 中文搜索结果不足 5 条时，自动用国际 Bing 补充搜索
-        if has_cjk and len(raw_results) < 5:
-            en_results = _bing_search(f"https://cn.bing.com/search?q={encoded}&ensearch=1&setlang=en")
-            seen = {r["url"] for r in raw_results}
-            for r in en_results:
-                if r["url"] not in seen:
-                    raw_results.append(r)
-                    seen.add(r["url"])
+        try:
+            # ensearch=1 对中文搜索质量最好（避免 cn.bing.com 拆词问题）
+            bing_url = f"https://cn.bing.com/search?q={encoded}&ensearch=1&setlang=en"
+            req = urllib.request.Request(bing_url, headers={"User-Agent": USER_AGENT_SHORT})
+            with opener.open(req, timeout=8) as r:
+                html = r.read().decode("utf-8", errors="ignore")
+            block_re = re.compile(r'<li[^>]*class="b_algo"[^>]*>([\s\S]*?)</li>', re.IGNORECASE)
+            for bm in block_re.finditer(html):
+                if len(raw_results) >= n:
+                    break
+                block = bm.group(1)
+                h2 = re.search(r'<h2[^>]*><a[^>]*>(.*?)</a>', block, re.IGNORECASE)
+                title = re.sub(r'<[^>]+>', '', h2.group(1)).strip().replace('&amp;', '&') if h2 else ""
+                cite = re.search(r'<cite[^>]*>(.*?)</cite>', block, re.IGNORECASE)
+                raw_url = re.sub(r'<[^>]+>', '', cite.group(1)).strip() if cite else ""
+                raw_url_clean = raw_url.split('›')[0].strip().replace(' ', '')
+                url = raw_url_clean if raw_url_clean.startswith('http') else 'https://' + raw_url_clean
+                full_text = re.sub(r'<[^>]+>', ' ', block)
+                full_text = full_text.replace('&ensp;', ' ').replace('&#0183;', ' • ').replace('&amp;', '&')
+                full_text = full_text.replace('&nbsp;', ' ').replace('&quot;', '"').replace('&#39;', "'")
+                full_text = re.sub(r'\s+', ' ', full_text).strip()
+                snippet = full_text
+                if title:
+                    snippet = snippet.replace(title, '').strip()
+                if raw_url:
+                    snippet = snippet.replace(raw_url, '').strip()
+                if len(snippet) > 600:
+                    snippet = snippet[:600] + ' [...]'
+                if title and url:
+                    raw_results.append({"title": title, "url": url, "snippet": snippet})
+            engine_used = "Bing"
+        except Exception:
+            pass
 
     # ── DuckDuckGo Instant Answer API (JSON — 备用，需代理) ──
     if not raw_results:
@@ -910,7 +894,9 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
     def _is_low_quality(r):
         t = r.get("title", "").lower()
         u = r.get("url", "").lower()
-        if "calendar" in t or "/calendar" in u:
+        if any(kw in t for kw in ["calendar", "major events of", "pop culture", "ปฏิทิน"]):
+            return True
+        if "/calendar" in u:
             return True
         if "top 10 best ai apps" in t or "top10.com/best" in u:
             return True
@@ -1156,7 +1142,16 @@ def web_fetch(work_dir: str, url: str, max_chars: int = 0) -> str:
             return f"(x) 不支持的内容类型: {ct}"
 
         if not text.strip():
-            return f"--- {url} ---\n(无有效文本)"
+            # HTML 解析为空 → 返回原始 HTML 纯文本（至少给 agent 一些内容）
+            raw_text = re.sub(r'<script[\s\S]*?</script>', '', html, flags=re.IGNORECASE)
+            raw_text = re.sub(r'<style[\s\S]*?</style>', '', raw_text, flags=re.IGNORECASE)
+            raw_text = re.sub(r'<[^>]+>', ' ', raw_text)
+            raw_text = raw_text.replace('&amp;', '&').replace('&nbsp;', ' ')
+            raw_text = re.sub(r'\s+', ' ', raw_text).strip()
+            if len(raw_text) > 50:
+                text = raw_text
+            else:
+                return f"--- {url} ---\n(无有效文本)"
 
         # ── 智能截断: 保留开头和结尾 ──
         if len(text) > limit:

@@ -34,7 +34,7 @@ USER_AGENT_SHORT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 PRODUCT_NAME = "cortex-agent"
 
 # ── MCP 客户端版本（统一，消除 "1.0" vs "2.7.0" 不一致）──
-MCP_CLIENT_VERSION = "2.9.8"
+MCP_CLIENT_VERSION = "2.9.9"
 MCP_CLIENT_INFO = {"name": PRODUCT_NAME, "version": MCP_CLIENT_VERSION}
 
 # ── ANSI 终端色板 ──

@@ -238,9 +238,8 @@ registry.register(
       } catch { /* fall through */ }
     }
 
-    // ── Bing CN (双语搜索：中文优先，结果不足时自动英文补充) ──
+    // ── Bing (ensearch=1 对中英文搜索质量都最好) ──
     if (!rawResults.length) {
-      const hasCJK = /[\u4e00-\u9fff\u3040-\u30ff]/.test(query);
       const searchBing = async (searchUrl: string): Promise<SearchItem[]> => {
         try {
           const resp = await fetch(searchUrl, {
@@ -272,20 +271,9 @@ registry.register(
           return items;
         } catch { return []; }
       };
-      // 第一次：中文用 setlang=zh-CN（避免返回英文通用列表页），英文用 ensearch=1
-      const url1 = hasCJK
-        ? `https://cn.bing.com/search?q=${encoded}&setlang=zh-CN`
-        : `https://cn.bing.com/search?q=${encoded}&ensearch=1&setlang=en`;
-      rawResults = await searchBing(url1);
+      // ensearch=1 对中文搜索质量最好（避免 cn.bing.com 拆词问题）
+      rawResults = await searchBing(`https://cn.bing.com/search?q=${encoded}&ensearch=1&setlang=en`);
       engineUsed = "Bing";
-      // 中文搜索结果不足 5 条时，自动用国际 Bing 补充搜索
-      if (hasCJK && rawResults.length < 5) {
-        const enResults = await searchBing(`https://cn.bing.com/search?q=${encoded}&ensearch=1&setlang=en`);
-        const seen = new Set(rawResults.map(r => r.url));
-        for (const r of enResults) {
-          if (!seen.has(r.url)) { rawResults.push(r); seen.add(r.url); }
-        }
-      }
     }
 
     // ── DuckDuckGo Instant Answer API (JSON — 备用，需代理) ──
@@ -337,10 +325,11 @@ registry.register(
       } catch { /* fall through */ }
     }
 
-    // ── 质量过滤：移除日历页面、通用 Top10 列表页等低质量结果 ──
+    // ── 质量过滤：移除日历页面、通用列表页等低质量结果 ──
     rawResults = rawResults.filter(r => {
       const t = r.title.toLowerCase(), u = r.url.toLowerCase();
-      if (/calendar/i.test(t) || /\/calendar/i.test(u)) return false;
+      if (/calendar|major events of|pop culture|ปฏิทิน/i.test(t)) return false;
+      if (/\/calendar/i.test(u)) return false;
       if (/top 10 best ai apps/i.test(t) || /top10\.com\/best/i.test(u)) return false;
       if (/best ai apps & websites/i.test(t)) return false;
       return true;
@@ -485,8 +474,32 @@ registry.register(
       return cached[1] + "\n[缓存命中]";
     }
 
+    // 回退函数：Firecrawl → Jina Reader（HTTP 失败或解析为空时使用）
+    const tryFallback = async (): Promise<string | null> => {
+      try {
+        const fcResp = await fetch("https://api.firecrawl.dev/v1/scrape", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url, formats: ["markdown"] }),
+          signal: AbortSignal.timeout(8000),
+        });
+        if (fcResp.ok) {
+          const fcData = await fcResp.json() as { data?: { markdown?: string; metadata?: { title?: string } } };
+          const md = fcData.data?.markdown || "";
+          const title = fcData.data?.metadata?.title || "";
+          if (md.length > 100) {
+            return `--- ${url} ---${title ? `\n标题: ${title}` : ""}\n\n${truncateMiddle(md, limit, 0.8)}`;
+          }
+        }
+      } catch { /* fall through to Jina */ }
+      const jinaText = await jinaReader(url, 8000);
+      if (jinaText && jinaText.length > 100) {
+        return `--- ${url} ---\n\n${truncateMiddle(jinaText, limit, 0.8)}`;
+      }
+      return null;
+    };
+
     // ── 策略 1: 原始 HTTP + HTML 解析（默认，无需外部服务）──
-    const isBlockedDomain = isSlowDomain(url) || url.includes("github.com") || url.includes("huggingface.co");
     try {
       const html = await httpRequest(url, 'GET', undefined, 8000);
       const ct = html.startsWith("{") ? "application/json" : "text/html";
@@ -506,57 +519,36 @@ registry.register(
         header = `--- ${url} ---\n[Content-Type: ${ct}]\n\n`;
       }
 
-      if (!text.trim()) {
+      // HTML 解析结果为空或太短 → 回退到 Firecrawl/Jina
+      if (!text.trim() || text.trim().length < 100) {
+        const fallback = await tryFallback();
+        if (fallback) {
+          if (_fetchCache.size >= FETCH_CACHE_MAX) _fetchCache.clear();
+          _fetchCache.set(cacheKey, [Date.now(), fallback]);
+          return fallback;
+        }
+        // Firecrawl/Jina 也失败 → 返回原始 HTML 纯文本（至少给 agent 一些内容）
+        const rawText = html.replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+        if (rawText.length > 50) {
+          const result = `${header}${truncateMiddle(rawText, limit, 0.8)}`;
+          if (_fetchCache.size >= FETCH_CACHE_MAX) _fetchCache.clear();
+          _fetchCache.set(cacheKey, [Date.now(), result]);
+          return result;
+        }
         return `--- ${url} ---\n(无有效文本)`;
       }
 
-      if (text.length > limit) {
-        const keepHead = Math.floor(limit * 0.8);
-        const keepTail = Math.floor(limit * 0.15);
-        text = text.slice(0, keepHead) + `\n\n[... 已截断，原文 ${text.length} 字符 ...]\n\n` + text.slice(-keepTail);
-      }
-
-      const result = header + text;
+      const result = header + truncateMiddle(text, limit, 0.8);
       if (_fetchCache.size >= FETCH_CACHE_MAX) _fetchCache.clear();
       _fetchCache.set(cacheKey, [Date.now(), result]);
       return result;
     } catch (httpErr: unknown) {
-      // ── 策略 2: Firecrawl Scrape（HTTP 失败时备用，云端代理访问，干净 Markdown）──
-      try {
-        const fcResp = await fetch("https://api.firecrawl.dev/v1/scrape", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url, formats: ["markdown"] }),
-          signal: AbortSignal.timeout(8000),
-        });
-        if (fcResp.ok) {
-          const fcData = await fcResp.json() as { data?: { markdown?: string; metadata?: { title?: string } } };
-          const md = fcData.data?.markdown || "";
-          const title = fcData.data?.metadata?.title || "";
-          if (md.length > 100) {
-            let text = md;
-            text = truncateMiddle(text, limit, 0.8);
-            const result = `--- ${url} ---${title ? `\n标题: ${title}` : ""}\n\n${text}`;
-            if (_fetchCache.size >= FETCH_CACHE_MAX) _fetchCache.clear();
-            _fetchCache.set(cacheKey, [Date.now(), result]);
-            return result;
-          }
-        }
-      } catch { /* fall through */ }
-
-      // ── 策略 3: Jina Reader（最终兜底）──
-      const jinaText = await jinaReader(url, 8000);
-      if (jinaText && jinaText.length > 100) {
-        let text = jinaText;
-        if (text.length > limit) {
-          const keepHead = Math.floor(limit * 0.8);
-          const keepTail = Math.floor(limit * 0.15);
-          text = text.slice(0, keepHead) + `\n\n[... 已截断，原文 ${text.length} 字符 ...]\n\n` + text.slice(-keepTail);
-        }
-        const result = `--- ${url} ---\n\n${text}`;
+      // ── 策略 2+3: Firecrawl → Jina（HTTP 失败时回退）──
+      const fallback = await tryFallback();
+      if (fallback) {
         if (_fetchCache.size >= FETCH_CACHE_MAX) _fetchCache.clear();
-        _fetchCache.set(cacheKey, [Date.now(), result]);
-        return result;
+        _fetchCache.set(cacheKey, [Date.now(), fallback]);
+        return fallback;
       }
       const msg = httpErr instanceof Error ? httpErr.message : String(httpErr);
       return `(x) 抓取失败: ${msg} — ${url}`;
