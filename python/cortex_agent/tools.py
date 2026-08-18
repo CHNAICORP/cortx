@@ -19,6 +19,7 @@ Cortex Agent 工具实现 — 所有工具注册到 registry
 import os, re, sys, sqlite3, platform, subprocess, datetime, json, csv, io, threading, time
 import urllib.parse, urllib.request, urllib.error
 from .cortex_agent import registry, RiskLevel, Capability, check_ssrf
+from .constants import truncate_middle, USER_AGENT, USER_AGENT_SHORT, PRODUCT_NAME
 
 _tasks = []  # 模块级简单任务存储
 
@@ -457,7 +458,7 @@ def check_server_status(work_dir: str, url: str, expected_status: int = 200,
     for attempt in range(1, max_retries + 1):
         try:
             req = _ureq.Request(url, method=method)
-            req.add_header("User-Agent", "CortexAgent/HealthCheck")
+            req.add_header("User-Agent", f"{PRODUCT_NAME}/HealthCheck")
             with _ureq.urlopen(req, timeout=timeout) as resp:
                 status = resp.status
                 body = resp.read(1000).decode("utf-8", errors="replace")
@@ -700,7 +701,7 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
         try:
             api_url = f"https://api.search.brave.com/res/v1/web/search?q={encoded}&count={n}"
             req = urllib.request.Request(api_url, headers={
-                "User-Agent": "Mozilla/5.0 (compatible; CortexAgent/1.0)",
+                "User-Agent": USER_AGENT_SHORT,
                 "Accept": "application/json",
                 "X-Subscription-Token": cfg["brave_api_key"],
                 "Accept-Encoding": "gzip",
@@ -726,7 +727,7 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
                 "query": query, "max_results": n * 2, "search_depth": "basic",
             }).encode()
             req = urllib.request.Request(api_url, data=body, headers={
-                "User-Agent": "Mozilla/5.0 (compatible; CortexAgent/1.0)",
+                "User-Agent": USER_AGENT_SHORT,
                 "Content-Type": "application/json",
                 "Accept": "application/json",
             })
@@ -772,7 +773,7 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
         try:
             api_url = f"https://serpapi.com/search?q={encoded}&api_key={cfg['serpapi_api_key']}&num={n*2}&engine=google"
             req = urllib.request.Request(api_url, headers={
-                "User-Agent": "Mozilla/5.0 (compatible; CortexAgent/1.0)",
+                "User-Agent": USER_AGENT_SHORT,
                 "Accept": "application/json",
             })
             with opener.open(req, timeout=timeout) as r:
@@ -792,7 +793,7 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
         try:
             bing_url = f"https://cn.bing.com/search?q={encoded}&ensearch=1&setlang=en"
             req = urllib.request.Request(bing_url, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "User-Agent": USER_AGENT_SHORT,
             })
             with opener.open(req, timeout=5) as r:
                 html = r.read().decode("utf-8", errors="ignore")
@@ -833,7 +834,7 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
         try:
             api_url = f"https://api.duckduckgo.com/?q={encoded}&format=json&no_html=1&skip_disambig=1"
             req = urllib.request.Request(api_url, headers={
-                "User-Agent": "Mozilla/5.0 (compatible; CortexAgent/1.0)",
+                "User-Agent": USER_AGENT_SHORT,
                 "Accept": "application/json",
             })
             with opener.open(req, timeout=8) as r:
@@ -861,7 +862,7 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
             url = "https://lite.duckduckgo.com/lite/"
             body = urllib.parse.urlencode({"q": query}).encode()
             req = urllib.request.Request(url, data=body, headers={
-                "User-Agent": "Mozilla/5.0 (compatible; CortexAgent/1.0)",
+                "User-Agent": USER_AGENT_SHORT,
                 "Content-Type": "application/x-www-form-urlencoded",
                 "Accept": "text/html",
             })
@@ -911,7 +912,7 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
     def _enrich(r):
         try:
             req = urllib.request.Request(r["url"], headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                "User-Agent": USER_AGENT_SHORT
             })
             with _build_opener().open(req, timeout=3) as resp:
                 html = resp.read(102400).decode("utf-8", errors="ignore")
@@ -1038,9 +1039,7 @@ def web_fetch(work_dir: str, url: str, max_chars: int = 0) -> str:
         if len(md) > 100:
             text = md
             if len(text) > limit:
-                keep_head = int(limit * 0.8)
-                keep_tail = int(limit * 0.15)
-                text = text[:keep_head] + f"\n\n[... 已截断，原文 {len(text)} 字符 ...]\n\n" + text[-keep_tail:]
+                text = truncate_middle(text, limit, 0.8)
             header = f"--- {url} ---" + (f"\n标题: {title}" if title else "") + "\n\n"
             result = header + text
             if len(_fetch_cache) >= _FETCH_CACHE_MAX:
@@ -1055,7 +1054,7 @@ def web_fetch(work_dir: str, url: str, max_chars: int = 0) -> str:
         try:
             jina_url = f"https://r.jina.ai/{url}"
             jina_req = urllib.request.Request(jina_url, headers={
-                "User-Agent": "cortex-agent",
+                "User-Agent": PRODUCT_NAME,
                 "Accept": "text/plain",
             })
             opener = _build_opener()
@@ -1065,9 +1064,7 @@ def web_fetch(work_dir: str, url: str, max_chars: int = 0) -> str:
                     if jina_text and len(jina_text) > 100:
                         text = jina_text
                         if len(text) > limit:
-                            keep_head = int(limit * 0.8)
-                            keep_tail = int(limit * 0.15)
-                            text = text[:keep_head] + f"\n\n[... 已截断，原文 {len(text)} 字符 ...]\n\n" + text[-keep_tail:]
+                            text = truncate_middle(text, limit, 0.8)
                         result = f"--- {url} ---\n\n{text}"
                         if len(_fetch_cache) >= _FETCH_CACHE_MAX:
                             _fetch_cache.clear()
@@ -1081,7 +1078,7 @@ def web_fetch(work_dir: str, url: str, max_chars: int = 0) -> str:
     try:
         jina_url = f"https://r.jina.ai/{url}"
         jina_req = urllib.request.Request(jina_url, headers={
-            "User-Agent": "cortex-agent",
+            "User-Agent": PRODUCT_NAME,
             "Accept": "text/plain",
         })
         opener = _build_opener()
@@ -1091,9 +1088,7 @@ def web_fetch(work_dir: str, url: str, max_chars: int = 0) -> str:
                 if jina_text and len(jina_text) > 100:
                     text = jina_text
                     if len(text) > limit:
-                        keep_head = int(limit * 0.8)
-                        keep_tail = int(limit * 0.15)
-                        text = text[:keep_head] + f"\n\n[... 已截断，原文 {len(text)} 字符 ...]\n\n" + text[-keep_tail:]
+                        text = truncate_middle(text, limit, 0.8)
                     result = f"--- {url} ---\n\n{text}"
                     if len(_fetch_cache) >= _FETCH_CACHE_MAX:
                         _fetch_cache.clear()
@@ -1106,7 +1101,7 @@ def web_fetch(work_dir: str, url: str, max_chars: int = 0) -> str:
     opener = _build_opener()
     try:
         req = urllib.request.Request(url, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": USER_AGENT,
             "Accept": "text/html,application/json,text/plain,*/*",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         })
@@ -1141,9 +1136,7 @@ def web_fetch(work_dir: str, url: str, max_chars: int = 0) -> str:
 
         # ── 智能截断: 保留开头和结尾 ──
         if len(text) > limit:
-            keep_head = int(limit * 0.8)
-            keep_tail = int(limit * 0.15)
-            text = text[:keep_head] + f"\n\n[... 已截断，原文 {len(text)} 字符 ...]\n\n" + text[-keep_tail:]
+            text = truncate_middle(text, limit, 0.8)
 
         result = header + text
 
@@ -1329,7 +1322,7 @@ def http_request(work_dir: str, url: str, method: str = "GET", body: str = "",
     if not ok:
         return f"(x) {reason}"
     try:
-        hdrs = {"User-Agent": "Mozilla/5.0 (compatible; CortexAgent/1.0)"}
+        hdrs = {"User-Agent": USER_AGENT_SHORT}
         if headers:
             for line in headers.strip().split("\n"):
                 if ":" in line:
@@ -1851,7 +1844,7 @@ def skill_install(work_dir: str, source: str, name: str = "") -> str:
     last_err = ""
     for url in urls:
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "cortex-agent/skill-install"})
+            req = urllib.request.Request(url, headers={"User-Agent": f"{PRODUCT_NAME}/skill-install"})
             with urllib.request.urlopen(req, timeout=30) as resp:
                 content = resp.read().decode("utf-8")
             if content and len(content) > 10 and "404: Not Found" not in content:

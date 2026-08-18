@@ -7,6 +7,7 @@ import * as path from "path";
 import * as fs from "fs";
 import { registry } from '../core/registry.js';
 import { RiskLevel, Capability } from '../core/types.js';
+import { MCP_CLIENT_INFO, PRODUCT_NAME } from '../core/constants.js';
 
 export interface McpRegistryEntry {
   name: string;
@@ -164,8 +165,28 @@ export function mcpExchange(serverCmd: string[], requests: string[], timeout = 9
 
 export function splitArgs(argsStr: string): string[] {
   if (!argsStr) return [];
-  // Simple space-based split (matching Python shlex for common cases)
-  return argsStr.split(/\s+/).filter(Boolean);
+  // 支持引号的安全分割（对齐 Python shlex 的常见场景）
+  // 处理 "arg with space" 和 'single quoted' 两种情况
+  const result: string[] = [];
+  let current = "";
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < argsStr.length; i++) {
+    const ch = argsStr[i];
+    if (ch === "'" && !inDouble) { inSingle = !inSingle; continue; }
+    if (ch === '"' && !inSingle) { inDouble = !inDouble; continue; }
+    if (ch === "\\" && i + 1 < argsStr.length) {
+      current += argsStr[++i];
+      continue;
+    }
+    if (/\s/.test(ch) && !inSingle && !inDouble) {
+      if (current) { result.push(current); current = ""; }
+      continue;
+    }
+    current += ch;
+  }
+  if (current) result.push(current);
+  return result;
 }
 
 registry.register(
@@ -217,7 +238,7 @@ registry.register(
     const serverArgs = String(args["serverArgs"] || "");
     const cmd = [serverCommand, ...splitArgs(serverArgs)];
     try {
-      const init = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "cortex-agent", version: "1.0" } } });
+      const init = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: PRODUCT_NAME, version: MCP_CLIENT_INFO.version } } });
       const notified = JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" });
       const listReq = JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
       const responses = await mcpExchange(cmd, [init, notified, listReq]);
@@ -248,7 +269,7 @@ registry.register(
     let argsDict: Record<string, unknown> = {};
     try { argsDict = JSON.parse(toolArgs); } catch { return `(x) toolArgs 不是有效的 JSON: ${toolArgs.slice(0, 100)}`; }
     try {
-      const init = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "cortex-agent", version: "1.0" } } });
+      const init = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: PRODUCT_NAME, version: MCP_CLIENT_INFO.version } } });
       const notified = JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" });
       const callReq = JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: toolName, arguments: argsDict } });
       const responses = await mcpExchange(cmd, [init, notified, callReq]);
@@ -387,7 +408,7 @@ function _initSession(session: McpSession): Promise<void> {
       await _sendRpc(session, "initialize", {
         protocolVersion: "2024-11-05",
         capabilities: {},
-        clientInfo: { name: "cortex-agent", version: "2.7.0" },
+        clientInfo: MCP_CLIENT_INFO,
       });
       if (session.proc.stdin) {
         session.proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");

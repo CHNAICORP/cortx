@@ -15,6 +15,7 @@
 import { registry } from '../core/registry.js';
 import { RiskLevel, Capability } from '../core/types.js';
 import { checkSsrf } from '../core/policy.js';
+import { truncateMiddle, USER_AGENT, USER_AGENT_SHORT, PRODUCT_NAME } from '../core/constants.js';
 import * as https from "node:https";
 import * as http from "node:http";
 
@@ -42,7 +43,7 @@ async function httpRequest(url: string, method = 'GET', body?: string, timeout =
     const options: Record<string, unknown> = {
       hostname, port, path, method, timeout,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': USER_AGENT,
         'Host': reqUrl.hostname,
         'Accept': 'text/html,application/json,*/*',
         'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
@@ -243,7 +244,7 @@ registry.register(
         const bingUrl = `https://cn.bing.com/search?q=${encoded}&ensearch=1&setlang=en`;
         const resp = await fetch(bingUrl, {
           signal: AbortSignal.timeout(5000),
-          headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
+          headers: { "User-Agent": USER_AGENT_SHORT },
         });
         const html = await resp.text();
         // 提取完整 b_algo 块（包含标题+URL+所有文本内容，非仅 <p> 段落）
@@ -345,19 +346,11 @@ registry.register(
       try {
         const resp = await fetch(r.url, {
           signal: AbortSignal.timeout(3000),
-          headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
+          headers: { "User-Agent": USER_AGENT_SHORT },
         });
         if (!resp.ok) return;
         const html = await resp.text();
-        let text = html
-          .replace(/<script[\s\S]*?<\/script>/gi, "")
-          .replace(/<style[\s\S]*?<\/style>/gi, "")
-          .replace(/<nav[\s\S]*?<\/nav>/gi, "")
-          .replace(/<footer[\s\S]*?<\/footer>/gi, "")
-          .replace(/<header[\s\S]*?<\/header>/gi, "")
-          .replace(/<[^>]+>/g, " ")
-          .replace(/&amp;/g, "&").replace(/&nbsp;/g, " ").replace(/&quot;/g, '"').replace(/&#39;/g, "'")
-          .replace(/\s+/g, " ").trim();
+        let text = htmlToReadable(html);
         if (text.length > 100) {
           r.snippet = text.slice(0, 1500);
         }
@@ -424,7 +417,7 @@ async function jinaReader(url: string, timeout = 8000): Promise<string | null> {
     const timer = setTimeout(() => controller.abort(), timeout);
     const resp = await fetch(jinaUrl, {
       signal: controller.signal,
-      headers: { "User-Agent": "cortex-agent", "Accept": "text/plain" },
+      headers: { "User-Agent": PRODUCT_NAME, "Accept": "text/plain" },
     });
     clearTimeout(timer);
     if (!resp.ok) return null;
@@ -524,11 +517,7 @@ registry.register(
           const title = fcData.data?.metadata?.title || "";
           if (md.length > 100) {
             let text = md;
-            if (text.length > limit) {
-              const keepHead = Math.floor(limit * 0.8);
-              const keepTail = Math.floor(limit * 0.15);
-              text = text.slice(0, keepHead) + `\n\n[... 已截断，原文 ${text.length} 字符 ...]\n\n` + text.slice(-keepTail);
-            }
+            text = truncateMiddle(text, limit, 0.8);
             const result = `--- ${url} ---${title ? `\n标题: ${title}` : ""}\n\n${text}`;
             if (_fetchCache.size >= FETCH_CACHE_MAX) _fetchCache.clear();
             _fetchCache.set(cacheKey, [Date.now(), result]);

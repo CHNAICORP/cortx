@@ -420,8 +420,9 @@ registry.register("模拟鼠标点击", RiskLevel.SYSTEM, Capability.BROWSER,
     }
     if (process.platform === "win32") {
       try {
+        // 移动光标 + 发送真实的鼠标点击事件（LEFTDOWN/UP），与 Python tools_computer.py 对齐
         require("child_process").execSync(
-          `powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(${Math.round(x)},${Math.round(y)})"`,
+          `powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(${Math.round(x)},${Math.round(y)}); Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class Mouse { [DllImport(\\"user32.dll\\")] public static extern void mouse_event(uint f, uint x, uint y, uint b, uint e); }'; [Mouse]::mouse_event(2, 0, 0, 0, 0); Start-Sleep -Milliseconds 50; [Mouse]::mouse_event(4, 0, 0, 0, 0)"`,
           { timeout: 10000 }
         );
         return `已点击 (${x}, ${y})`;

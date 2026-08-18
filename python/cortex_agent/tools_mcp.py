@@ -9,6 +9,7 @@ mcp_list_servers / mcp_list_tools / mcp_call_tool
 import os, re, sys, json, shlex, platform, subprocess
 import shutil as _shutil
 from .cortex_agent import registry, RiskLevel, Capability
+from .constants import MCP_CLIENT_INFO
 
 
 # ══════════════════════════════════════════════════════════════
@@ -227,7 +228,7 @@ def mcp_list_tools(work_dir: str, server_command: str, server_args: str = "") ->
     try:
         init = _j.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": {"protocolVersion": "2024-11-05", "capabilities": {},
-                       "clientInfo": {"name": "cortex-agent", "version": "1.0"}}})
+                       "clientInfo": MCP_CLIENT_INFO}})
         notified = _j.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})
         list_req = _j.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         responses = _mcp_exchange(cmd, [init, notified, list_req])
@@ -266,7 +267,7 @@ def mcp_call_tool(work_dir: str, server_command: str, server_args: str = "",
     try:
         init = _j.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": {"protocolVersion": "2024-11-05", "capabilities": {},
-                       "clientInfo": {"name": "cortex-agent", "version": "1.0"}}})
+                       "clientInfo": MCP_CLIENT_INFO}})
         notified = _j.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})
         call_req = _j.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
             "params": {"name": tool_name, "arguments": args_dict}})
@@ -347,7 +348,7 @@ class _McpSession:
         # 发送 initialize
         resp = self._request("initialize", {
             "protocolVersion": "2024-11-05", "capabilities": {},
-            "clientInfo": {"name": "cortex-agent", "version": "1.0"},
+            "clientInfo": MCP_CLIENT_INFO,
         })
         if resp is None:
             err = self._drain_stderr()

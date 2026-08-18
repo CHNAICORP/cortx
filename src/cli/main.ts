@@ -464,7 +464,6 @@ async function main(): Promise<void> {
     checkpointInterval: (settings.checkpoint_interval as number) || 5,
     retryMax: (settings.retry_max as number) ?? 5,
     retryBaseDelay: (settings.retry_base_delay as number) || 2,
-    compactThreshold: (settings.compact_threshold as number) || 0,
     compactInputPct: (settings.compact_input_pct as number) || 85,
     compactKeepRecent: (settings.compact_keep_recent as number) || 12,
   });
@@ -965,7 +964,7 @@ async function main(): Promise<void> {
     }
     // ── /kb — 查看知识库 ──
     if (q === "/kb") {
-      const kbPath = path.join(process.cwd(), "CORTEX.md");
+      const kbPath = path.join(agent.config.workDir, "CORTEX.md");
       if (fs.existsSync(kbPath)) {
         const content = fs.readFileSync(kbPath, "utf-8");
         const lines = content.split("\n");
@@ -983,7 +982,7 @@ async function main(): Promise<void> {
     }
     // ── /init — 初始化项目 CORTEX.md ──
     if (q === "/init") {
-      const kbPath = path.join(process.cwd(), "CORTEX.md");
+      const kbPath = path.join(agent.config.workDir, "CORTEX.md");
       console.log(`\x1b[36m正在分析项目...\x1b[0m`);
       let pyCount = 0, tsCount = 0;
       try {
@@ -1003,10 +1002,8 @@ async function main(): Promise<void> {
     }
     // ── /memory ──
     if (q === "/memory" || q === "/mem") {
-      // @ts-ignore
       if (!agent.memory) { console.log("(记忆系统不可用)"); }
       else {
-        // @ts-ignore
         const facts = agent.memory.listAll();
         if (!facts.length) console.log("(没有记住任何事实)");
         else for (const f of facts) console.log(`  \x1b[36m${f}\x1b[0m`);
@@ -1016,10 +1013,8 @@ async function main(): Promise<void> {
     // ── /forget ──
     if (q.startsWith("/forget ")) {
       const name = q.split(" ", 2)[1].trim();
-      // @ts-ignore
       if (!agent.memory) { console.log("(记忆系统不可用)"); }
       else {
-        // @ts-ignore
         if (agent.memory.remove(name)) console.log(`已忘记: ${name}`);
         else console.log(`(x) 未找到: ${name}`);
       }
@@ -1077,7 +1072,7 @@ const cs = agent.cacheStats;
         }
       }
       // ── 知识库状态 ──
-      const kbPath = path.join(process.cwd(), "CORTEX.md");
+      const kbPath = path.join(agent.config.workDir, "CORTEX.md");
       const kbStatus = fs.existsSync(kbPath) ? `${GN}已加载${G}` : `${GR}未创建${G}`;
       console.log(`  ${CY}├${"─".repeat(46)}┤${G}`);
       console.log(`  ${CY}│${G}  📚 知识库                                    ${CY}│${G}`);

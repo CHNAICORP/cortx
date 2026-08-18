@@ -178,26 +178,10 @@ export function resolveCapabilities(model: string): ModelCaps {
 let activeProvider = "deepseek";
 let activeBaseUrl = "https://api.deepseek.com/v1";
 const ANTHROPIC_VERSION = "2023-06-01";
-// Anthropic prompt cache TTL：null=默认 5 分钟；"1h"=1 小时（写缓存费用更高）
-let anthropicCacheTtl: string | null = null;
 
-export function setAnthropicCacheTtl(ttl: string | null): void {
-  anthropicCacheTtl = ttl;
-}
-
-/** Anthropic prompt cache 断点标记（ephemeral；可选 1h TTL）。 */
+/** Anthropic prompt cache 断点标记（ephemeral）。 */
 function anthropicCacheControl(): Record<string, unknown> {
-  const cc: Record<string, unknown> = { type: "ephemeral" };
-  if (anthropicCacheTtl) cc.ttl = anthropicCacheTtl;
-  return cc;
-}
-
-export function setupProviders(providers?: Record<string, ProviderCfg>, active?: string) {
-  if (providers) Object.assign(DEFAULT_PROVIDERS, providers);
-  if (active) {
-    activeProvider = active;
-    activeBaseUrl = DEFAULT_PROVIDERS[active]?.baseUrl || activeBaseUrl;
-  }
+  return { type: "ephemeral" };
 }
 
 export function resolveModel(name: string): string {
@@ -812,5 +796,4 @@ export class LLMProvider {
   }
 
   static resolve = resolveModel;
-  static setupProviders = setupProviders;
 }

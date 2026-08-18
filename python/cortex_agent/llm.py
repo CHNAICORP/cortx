@@ -156,7 +156,7 @@ class LLMProvider:
     ]
     # 全局回退默认值
     _FALLBACK_CAPS = {"context_window": 128_000, "max_output_tokens": 8192}
-    # 当前激活的提供者（首次使用前由 AgentConfig.setup_providers 初始化）
+    # 当前激活的提供者（首次使用前由 LLMProvider.setup 初始化）
     _active = None
     _provider_name = None
     # Anthropic API 版本

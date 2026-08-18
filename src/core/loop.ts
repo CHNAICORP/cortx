@@ -18,8 +18,9 @@ export { LLMProvider } from './llm.js';
 import { MemoryStore, SessionStore } from './memory_store.js';
 import { SkillManager } from './skills.js';
 import { HookManager } from './hooks.js';
-import { setToolContext, clearToolContext, getToolContext } from './tool_context.js';
+import { setToolContext, getToolContext } from './tool_context.js';
 import { SubagentTerminal, SubagentToolCall } from '../cli/terminal.js';
+import { setToolTimeout } from '../tools/exec.js';
 
 // Terminal color shortcuts for inline rendering
 const Terminal_DIM = "\x1b[38;5;245m";
@@ -32,150 +33,69 @@ export { setToolContext, getToolContext } from './tool_context.js';
 
 // ── 默认系统提示 ──
 const DEFAULT_SYSTEM = [
-  "你是 Cortex Agent，一个 AI Agent 运行时框架（Harness Agent 架构 + Agentic Loop 引擎），基于用户配置的 LLM 模型运行。",
+  "你是 Cortex Agent，一个 AI Agent 运行时框架（Harness Agent 架构 + Agentic Loop 引擎），基于用户在 settings.json 中配置的 LLM 模型运行。",
   "当用户问「你是什么模型」时，回答：你是 Cortex Agent，当前底层模型由用户在 settings.json 中配置。",
   "",
-  "== 最高优先级规则：判断是否需要工具 ==",
-  "在收到用户输入后，你首先必须判断：这个请求是否需要调用工具？",
+  "== 工具使用判断 ==",
+  "收到用户输入后，先判断是否需要工具：",
+  "  - 问候/闲聊/你已具备知识的问题 → 直接文字回复，不调用工具",
+  "  - 需要读写文件/执行命令/搜索网络/操作浏览器 → 进入工作循环",
+  "  ⚠ 每次用户输入都是新请求，不要因历史记录自行继续旧任务。",
   "",
-  "  【不需要工具 → 直接回复】以下情况，不要调用任何工具，直接用文字回复用户：",
-  "  - 问候、闲聊（如「你好」「谢谢」「你是谁」）",
-  "  - 你已具备知识可以直接回答的问题（如「Python 怎么读文件」「HTTP 状态码 404 是什么意思」）",
-  "  - 对之前工作的简单询问（如「你刚才做了什么」「总结一下进度」）",
-  "",
-  "  【需要工具 → 进入工作循环】以下情况，使用工具完成任务：",
-  "  - 需要读取/写入/修改文件",
-  "  - 需要执行 shell 命令",
-  "  - 需要搜索网络获取实时信息",
-  "  - 需要操作浏览器、数据库等外部系统",
-  "",
-  "  ⚠ 重要：用户没有明确要求「继续之前的任务」时，不要因为上下文中有历史操作记录就自行继续旧任务。",
-  "  每次用户输入都是一个新的请求，请根据当前输入的内容判断意图。",
-  "",
-  "== 核心工作循环（需要工具时遵守）==",
-  "当用户的请求需要使用工具时，你必须遵循以下循环：",
-  "",
-  "  ┌─────────┐     ┌─────────┐     ┌─────────┐     ┌─────────┐",
-  "  │  思考    │ →  │  调用工具 │ →  │  反思    │ →  │  继续/完成 │",
-  "  │ (Think)  │     │  (Act)   │     │(Reflect) │     │(Loop/Done)│",
-  "  └─────────┘     └─────────┘     └─────────┘     └─────────┘",
-  "",
-  "**第一步：思考（必须）**",
-  "  在调用任何工具之前，你必须先思考：",
-  "  - 用户想要什么？当前任务的目标是什么？",
-  "  - 我已经知道什么？还缺少什么信息？",
-  "  - 下一步应该做什么？为什么选择这个方案？",
-  "  - 不要跳过思考直接调用工具。先想清楚再行动。",
-  "",
-  "**第二步：调用工具**",
-  "  经过思考后，如果需要使用工具来完成当前步骤：",
-  "  - 调用最合适的工具（优先专用工具，如 edit_file 而非 shell）",
-  "  - 每次只调用当前步骤需要的工具，不要一次调用过多工具",
-  "",
-  "**第三步：反思（必须）**",
-  "  拿到工具返回结果后，你必须反思：",
-  "  - 工具执行成功了吗？结果是否符合预期？",
-  "  - 当前任务完成了吗？还有哪些步骤没做？",
-  "  - 如果有错误，根因是什么？如何修复？",
-  "  - 如果任务完成，直接给出最终回答（不再调用工具）",
-  "  - 如果任务未完成，继续下一轮思考→调用→反思",
-  "",
-  "**第四步：完成判断**",
-  "  当所有步骤都完成后，给出清晰的最终回答。",
-  "  不要在任务完成后继续调用不必要的工具。",
-  "  最终回答应该总结你完成的工作和关键结果。",
+  "== 工作循环：思考 → 调用工具 → 反思 → 继续/完成 ==",
+  "1. 思考：用户想要什么？还缺什么信息？下一步做什么？为什么选这个方案？",
+  "2. 调用工具：优先专用工具（如 edit_file 而非 shell），每次只调用当前步骤需要的工具。",
+  "3. 反思：工具成功了吗？任务完成了吗？有错误则定位根因并修复。完成则给出最终回答。",
   "",
   "== 安全边界 ==",
-  "1. 不得执行可能危害系统安全、泄露数据或破坏系统完整性的操作。",
-  "2. 不得修改系统配置或系统服务文件（如 C:\\Windows, /etc 等）。",
-  "3. 不得将文件内容通过外部网络发送。",
-  "4. 不得读取系统敏感文件。",
-  "5. 不得使用编码命令或混淆方式执行 shell。",
-  "6. 文件操作可以在用户目录范围内自由进行（桌面、文档、工作目录等）。",
+  "1. 不得危害系统安全、泄露数据或破坏系统完整性。",
+  "2. 不得修改系统配置文件（C:\\Windows, /etc 等）或读取系统敏感文件（/etc/passwd、~/.ssh、SAM、注册表）。",
+  "3. 不得将文件内容通过外部网络发送，不得使用编码命令或混淆方式执行 shell。",
+  "4. 文件操作可在用户目录范围内自由进行（桌面、文档、工作目录等）。",
   "",
-  "== 企业级大项目工程指引 ==",
-  "你具备连续长时间工作的能力，可以完成 10 万行以上代码的大型项目。遵循以下原则：",
-  "1. **任务分解**：复杂任务先用 write_file 创建 TASKS.md，分解为里程碑和子任务。",
-  "2. **渐进式开发**：按依赖顺序逐个模块完成。每完成一个子任务更新 TASKS.md 标记 [x]。",
-  "3. **即时验证**：写完代码文件后立即运行编译或语法检查，发现错误立即修复。",
-  "4. **问题感知与自修复**：当工具返回错误时，仔细阅读错误信息，定位根因，使用 edit_file 修复后重新验证。",
-  "5. **上下文管理**：当上下文被压缩时，通过读取 TASKS.md 和已有代码文件恢复进度感知。",
-  "6. **最终验证**：所有模块完成后运行完整构建和测试，确保零错误。",
+  "== 验证策略 ==",
+  "模型可能不支持图像识别，验证结果优先用文本方式：",
+  "  - 页面验证：browser_snapshot() 获取页面文本，而非 browser_screenshot()",
+  "  - 服务验证：check_server_status(url=...) 发送 HTTP 请求",
+  "  - 代码验证：run_shell_command 运行测试/编译，grep/read_file 检查代码",
+  "⚠️ 连续截图 2 次仍无法确认时，立即切换文本验证。",
+  "服务器启动用 run_background_command（非 run_shell_command），Windows 命令分隔符用 ;（非 &&）。",
   "",
-  "== 服务器启动与验证指引 ==",
-  "当需要启动开发服务器（Flask/Django/Express/Vite 等）进行端到端验证时：",
-  "  1. **使用 run_background_command** 在后台启动服务器，不要用 run_shell_command（会被阻塞检测拦截）",
-  "  2. **等待 2-3 秒** 让服务器完成启动（可以先做其他操作）",
-  "  3. **使用 check_server_status** 发送 HTTP 请求验证服务是否正常响应",
-  "  4. **验证完成后** 使用 stop_background_process 停止后台进程",
-  "  示例流程：",
-  "    run_background_command(command='python app.py')  → 返回 PID",
-  "    check_server_status(url='http://localhost:5000/api/health')  → 验证服务（自动重试3次）",
-  "    stop_background_process(pid=12345)  → 清理进程",
-  "",
-  "  ⚠ Windows 环境使用 PowerShell，命令分隔符用 ;（不要用 && 或 &）",
-  "",
-  "== 验证策略（重要）==",
-  "你的模型可能不支持图像识别。验证结果时优先使用文本方式，不要依赖截图：",
-  "  - 页面验证：用 browser_snapshot() 获取页面文本，而非 browser_screenshot()",
-  "  - 服务验证：用 check_server_status(url=...) 发送 HTTP 请求验证响应",
-  "  - 代码验证：用 run_shell_command 运行测试/编译，用 grep/read_file 检查代码",
-  "  - 文件验证：用 read_file 读取文件内容确认结果",
-  "⚠️ 截图工具仅保存图片到文件，文本模型无法识别内容。连续截图 2 次仍无法确认时，立即切换文本验证。",
-  "",
-  "联网搜索或查询实时信息前，先调用 get_current_time 获取当前时间以确保时效性。",
-  "搜索时务必将获取到的具体年份和月份直接写入搜索关键词中。",
-  "",
-  "== 联网搜索策略（硬性纪律）==",
-  "搜索纪律（必须遵守）：",
-  "  1. 搜索 1 次 → 搜索结果已包含前2条页面的富内容（约1500字/条），先看是否已包含答案",
-  "  2. 搜索结果有答案 → 立即回答用户，不要调用 web_fetch",
-  "  3. 搜索结果不够 → web_fetch 抓取 1 个最相关的页面",
-  "  4. 仍然不够 → 换关键词再搜 1 次（最后一次）",
-  "  5. 无论如何，最多 2 次搜索 + 1 次抓取，然后必须用已有信息回答",
-  "⚠️ 搜索结果已包含页面正文内容，多数情况不需要 web_fetch。不要用 http_request 获取数据。",
+  "== 联网搜索纪律（硬性约束）==",
+  "1. 搜索 1 次 → 结果已包含前2条页面富内容（约1500字/条），先看是否已有答案",
+  "2. 有答案 → 立即回答，不要 web_fetch",
+  "3. 不够 → web_fetch 抓取 1 个最相关页面",
+  "4. 仍不够 → 换关键词再搜 1 次（最后一次）",
+  "5. 最多 2 次搜索 + 1 次抓取，然后必须用已有信息回答",
+  "⚠️ 搜索结果已含页面正文，多数情况不需要 web_fetch。不要用 http_request 获取数据。",
   "⚠️ 子代理返回的结果已是最终结果，主代理不要重复搜索或抓取同一内容。",
+  "搜索前先调用 get_current_time 获取当前时间，将年份月份写入搜索关键词。",
   "",
   "== 技能系统 (Skills) ==",
-  "你拥有技能系统。技能是可复用的专家级指引模板，能为特定任务提供专业方法论（如代码审查、PPT 制作、Office 文档处理、安全审计等）。",
-  "  - 调用 list_skills() 查看所有可用技能（内置 + 项目 .cortx/skills/ 下的自定义技能）",
-  "  - 调用 use_skill(name=\"技能名\") 加载某技能的完整指引到上下文",
-  "  - 调用 skill_install(source=\"owner/repo\") 从 GitHub 安装新技能，自动注册立即可用",
-  "  - 调用 skill_remove(name=\"技能名\") 删除已安装的自定义技能",
-  "当用户任务匹配某个技能领域时，先 list_skills 查看，再用 use_skill 加载对应技能的指引，然后按指引执行任务。",
+  "技能是可复用的专家级指引模板。用 list_skills() 查看，use_skill(name=...) 加载，skill_install(source=...) 安装，skill_remove(name=...) 删除。",
+  "任务匹配技能领域时，先 list_skills 再 use_skill 加载指引，然后按指引执行。",
   "",
   "== 子代理系统 (Subagents) ==",
-  "你可以派遣子代理执行独立任务，子代理拥有独立的上下文，执行完毕后返回结果摘要，不污染主对话。",
-  "  - spawn_subagent(task=\"任务描述\") — 派遣单个子代理",
-  '  - spawn_subagents(tasks_json=\'[{"task":"任务1"},{"task":"任务2"}]\') — 并行派遣多个子代理（fan-out）',
+  "可派遣子代理执行独立任务（独立上下文，返回结果摘要，不污染主对话）。",
+  "  - spawn_subagent(task=\"...\") 派遣单个；spawn_subagents(tasks_json=\"...\") 并行派遣多个（fan-out）。",
+  "  - 可选参数：tools 限制工具，skill 预加载技能。",
+  "复杂任务（3+ 模块分析、多维度审查、大规模项目）主动用 spawn_subagents 并行拆分。子代理拥有无限步数。",
   "",
-  "子代理支持可选参数：",
-  "  - tools: 限制子代理可用的工具（逗号分隔，如 \"read_file,grep,glob\"）",
-  "  - skill: 预加载技能（如 \"code-review\"），技能指引注入子代理上下文",
+  "== MCP 服务器 ==",
+  "预装 chrome-devtools（浏览器自动化）和 cua-driver（桌面控制）MCP 服务器。",
+  "用 mcp_list_servers() 查看，mcp_session_start() 启动持久会话，mcp_session_call() 调用工具。",
   "",
-  "适用场景：大规模代码分析（拆分为多个子任务并行）、多维度审查（安全/性能/测试分别由不同子代理检查）、",
-  "独立研究任务（避免大量中间结果占用主上下文）。复杂任务优先考虑用 spawn_subagents 并行拆分。",
-  "",
-  "主动派遣时机：任务涉及 3+ 个独立模块分析、需要多维度审查（安全+性能+测试）、或用户要求「全面/多维度」分析时，",
-  "主动用 spawn_subagents 并行拆分。单文件简单审查则直接做，不必派遣。",
-  "",
-  "派遣数量建议（根据任务复杂度）：",
-  "  - 1 个：单文件审查、简单研究任务",
-  "  - 2-3 个：多维度分析（安全+质量+测试）、多文件对比",
-  "  - 4+ 个：大规模项目分析（按模块拆分，每模块一个子代理）",
-  "判断依据：任务涉及的独立维度数、文件数、预计工具调用次数。宁多不少，并行更快。",
-  "子代理拥有无限步数，自主决定何时完成任务。任务即将完成时主动总结并返回结果。",
-  "",
-  "== MCP 服务器（预配置）==",
-  "你预装了以下 MCP 服务器，通过 mcp_session_start 启动持久化会话即可使用其工具方法：",
-  '  - chrome-devtools: 浏览器自动化（29个工具：导航/截图/点击/填表/性能分析/网络检查）— mcp_session_start(session_id="cd", server_command="npx", server_args="-y chrome-devtools-mcp@latest")',
-  '  - cua-driver: 桌面控制（55个工具：截图/点击/键盘/应用管理/窗口控制/剪贴板）— mcp_session_start(session_id="cua", server_command="cua-driver", server_args="mcp")',
-  "用 mcp_list_servers() 查看所有已配置服务器，mcp_session_call() 调用具体工具方法。",
+  "== 大项目工程指引 ==",
+  "复杂任务先创建 TASKS.md 分解子任务，渐进式开发，即时验证（写完即编译/测试），",
+  "上下文压缩时读 TASKS.md 恢复进度。最终运行完整构建和测试确保零错误。",
 ].join("\n");
 
 // ── ContextGovernor ──
 export class ContextGovernor {
-  static TOKENS_PER_CHAR = 0.4;
+  /** ASCII 字符的 token 估算系数（英文/代码约 0.4 token/char） */
+  static TOKENS_PER_CHAR_ASCII = 0.4;
+  /** CJK 字符的 token 估算系数（中文/日文/韩文约 1.0 token/char） */
+  static TOKENS_PER_CHAR_CJK = 1.0;
   /** 工具结果压缩阈值（字符数） */
   static COMPRESS_THRESHOLD = 6000;
   static COMPRESS_HEAD = 2400;
@@ -192,7 +112,6 @@ export class ContextGovernor {
   static COMPACT_KEEP_RECENT = 12;
 
   system: Message;
-  maxMsgs: number;
   contextLimit: number;
   maxTokens: number;
   maxInputTokens: number;
@@ -207,7 +126,7 @@ export class ContextGovernor {
   compactKeepRecent: number;
 
   constructor(opts: {
-    system?: string; workDir?: string; maxMsgs?: number;
+    system?: string; workDir?: string;
     memoryContext?: string; historySummary?: string;
     kbContext?: string; contextLimit?: number;
     maxInputTokens?: number; maxTokens?: number;
@@ -221,7 +140,6 @@ export class ContextGovernor {
     if (opts.historySummary) parts.push(`\n${opts.historySummary}`);
     if (opts.workDir) parts.push(`\n工作目录: ${opts.workDir}`);
     this.system = { role: "system", content: parts.join("\n") };
-    this.maxMsgs = opts.maxMsgs || 24;
     this.contextLimit = opts.contextLimit || 1_000_000;
     this.maxTokens = opts.maxTokens || 16384;
     // 可调参数：使用传入值或回退到类常量默认值
@@ -258,6 +176,23 @@ export class ContextGovernor {
     return ContextGovernor.compressResult(text, this);
   }
 
+  /** CJK 感知的 token 估算 — 中文内容 ~1.0 token/char，ASCII ~0.4 token/char。
+   *  旧实现固定 0.4 对中文严重低估，导致 compact 在上下文溢出前不触发。 */
+  static estimateTextTokens(text: string): number {
+    if (!text) return 0;
+    let ascii = 0, cjk = 0;
+    for (let i = 0; i < text.length; i++) {
+      const c = text.charCodeAt(i);
+      // CJK 统一汉字、扩展A、平假名、片假名、韩文、全角符号
+      if ((c >= 0x3000 && c <= 0x9FFF) || (c >= 0xAC00 && c <= 0xD7AF) || (c >= 0xFF00 && c <= 0xFFEF)) {
+        cjk++;
+      } else {
+        ascii++;
+      }
+    }
+    return Math.floor(ascii * ContextGovernor.TOKENS_PER_CHAR_ASCII + cjk * ContextGovernor.TOKENS_PER_CHAR_CJK);
+  }
+
   static estimateTokens(msgs: Message[]): number {
     let total = 0;
     for (const m of msgs) {
@@ -266,7 +201,7 @@ export class ContextGovernor {
         content += JSON.stringify(m.tool_calls.map(tc => tc.function));
       }
       if (typeof content === "string") {
-        total += Math.floor(content.length * ContextGovernor.TOKENS_PER_CHAR);
+        total += ContextGovernor.estimateTextTokens(content);
       }
     }
     return Math.max(total, 1);
@@ -324,6 +259,11 @@ export class ContextGovernor {
     }
 
     let compactText = `[上下文压缩 — ${old.length}条消息已摘要]\n`;
+    // 保留原始用户目标（防止长任务丢失目标连续性）
+    const firstUserMsg = old.find(m => m.role === "user");
+    if (firstUserMsg && firstUserMsg.content) {
+      compactText += `原始目标: ${firstUserMsg.content.slice(0, 500)}\n`;
+    }
     if (toolCallsSeen.length > 0) {
       const freq: Record<string, number> = {};
       for (const t of toolCallsSeen) freq[t] = (freq[t] || 0) + 1;
@@ -348,10 +288,27 @@ export class ContextGovernor {
 
   static loadKb(projectDir: string): string {
     const kbPath = path.join(projectDir, "CORTEX.md");
-    if (fs.existsSync(kbPath)) {
-      try { return fs.readFileSync(kbPath, "utf-8"); } catch { /* ignore */ }
-    }
-    return "";
+    if (!fs.existsSync(kbPath)) return "";
+    try {
+      const content = fs.readFileSync(kbPath, "utf-8");
+      return ContextGovernor._resolveImports(content, projectDir, 0);
+    } catch { return ""; }
+  }
+
+  /** 递归解析 @import <path> 指令（深度限制 3，防止循环引用）。与 Python 对齐。 */
+  private static _resolveImports(content: string, baseDir: string, depth: number): string {
+    if (depth >= 3) return content;
+    return content.replace(/^@import\s+(.+)$/gm, (match, importPath) => {
+      const trimmed = importPath.trim().replace(/^["']|["']$/g, "");
+      const full = path.isAbsolute(trimmed) ? trimmed : path.join(baseDir, trimmed);
+      try {
+        if (fs.existsSync(full)) {
+          const imported = fs.readFileSync(full, "utf-8");
+          return ContextGovernor._resolveImports(imported, path.dirname(full), depth + 1);
+        }
+      } catch { /* ignore */ }
+      return match;
+    });
   }
 
   init(query: string): Message[] {
@@ -493,10 +450,13 @@ export class ToolExecutor {
     const fn = this.reg.get(name);
     if (!fn) return `(x) 未知工具: ${name}`;
     try {
-      // snake_case 别名归一化：接受 Python 风格参数名，转为工具的 camelCase
+      // snake_case 别名：同时保留原始 key 和 camelCase 别名，
+      // 这样无论工具读 args["allowed_domains"] 还是 args["allowedDomains"] 都能找到。
       const normArgs: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(args)) {
-        normArgs[ToolExecutor.SNAKE_ALIASES[k] || k] = v;
+        normArgs[k] = v;
+        const alias = ToolExecutor.SNAKE_ALIASES[k];
+        if (alias && alias !== k) normArgs[alias] = v;
       }
       const result = fn(this.workDir, normArgs);
       if (result instanceof Promise) {
@@ -596,6 +556,7 @@ export class CortexAgent {
 
     this.policy = new PolicyEngine(wd, { permissionMode: this.config.permissionMode });
     this.executor = new ToolExecutor(wd, this.config.toolTimeout, this.config.maxResultChars);
+    setToolTimeout(this.config.toolTimeout);
 
     // ── 记忆 + 会话存储 ──
     const memoryPath = this.config.memoryDir || path.join(wd, "memory.md");
@@ -866,7 +827,6 @@ this._skillMgr = new SkillManager(this.config.workDir);
         ? this.config.systemPrompt
         : DEFAULT_SYSTEM + `\n\n[身份信息] 你是 Cortex Agent，当前底层模型: ${this.config.model}。`,
       workDir: this.config.workDir,
-      maxMsgs: this.config.maxContextMsgs,
       memoryContext: memoryCtx,
       historySummary: historySummary,
       kbContext: kb,
@@ -953,6 +913,8 @@ this._skillMgr = new SkillManager(this.config.workDir);
   /** @internal Public for CLI access — matches Python's public attribute */
   get sessions(): SessionStore | null { return this._sessions; }
   get memoryStore(): MemoryStore | null { return this._memory; }
+  /** CLI 别名 — /memory 和 /forget 命令通过 agent.memory 访问 */
+  get memory(): MemoryStore | null { return this._memory; }
 
   switchModel(alias: string): void {
     this.llm.switch(alias); this.config.model = this.llm.model;
@@ -978,10 +940,6 @@ this._skillMgr = new SkillManager(this.config.workDir);
       return "yolo — 全部放行";
     }
     return `(x) 未知模式: ${mode}\n可用: standard | auto | yolo`;
-  }
-
-  async chat(query: string, maxSteps?: number): Promise<string> {
-    return this.run(query, maxSteps, true);
   }
 
   get goal(): string {
@@ -1594,10 +1552,15 @@ this._skillMgr = new SkillManager(this.config.workDir);
       l1Reasoning = reasoning || "";
     } catch (e: any) { this.lastLlmError = `[L1] ${e?.message || e}`; /* fall through */ }
 
+    // 非瞬态错误（认证/模型不存在）提前退出，避免无意义的级联重试
+    if (/401|403|invalid_api_key|model_not_found|authentication/i.test(this.lastLlmError)) {
+      return { text: null, toolCalls: null, reasoning: "" };
+    }
+
     // ── Level 2: 关闭推理模式（解决 finishReason=length） ──
     await new Promise(r => setTimeout(r, 500));
     try {
-      const { text, toolCalls } = await doCall(false);
+      const { text, toolCalls } = await doCallWithRetry(false);
       if (text || toolCalls) {
         return { text, toolCalls, reasoning: "" };
       }
@@ -1607,7 +1570,7 @@ this._skillMgr = new SkillManager(this.config.workDir);
     await new Promise(r => setTimeout(r, 500));
     const compressedCtx = this.governor.compact([...this.ctx], 8);  // 强制压缩一轮
     try {
-      const { text, toolCalls } = await doCall(false, compressedCtx);
+      const { text, toolCalls } = await doCallWithRetry(false, compressedCtx);
       if (text || toolCalls) {
         return { text, toolCalls, reasoning: "" };
       }
@@ -1621,7 +1584,7 @@ this._skillMgr = new SkillManager(this.config.workDir);
     let l4Tcs: ParsedToolCall[] | null = null;
     let l4Reasoning = "";
     try {
-      const { text, toolCalls, reasoning } = await doCall(false);
+      const { text, toolCalls, reasoning } = await doCallWithRetry(false);
       l4Text = text; l4Tcs = toolCalls; l4Reasoning = reasoning;
     } catch (e: any) { this.lastLlmError = `[L4] ${e?.message || e}`; }
     // 使用 finally 模式确保 nudge 只被 pop 一次（与 Python 对齐）

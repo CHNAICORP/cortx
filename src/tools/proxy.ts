@@ -7,6 +7,7 @@ import { execSync, spawnSync } from "child_process";
 import { registry } from '../core/registry.js';
 import { RiskLevel, Capability } from '../core/types.js';
 import { MCP_REGISTRY, McpRegistryEntry, mcpExchange, splitArgs } from './mcp.js';
+import { MCP_CLIENT_INFO, PRODUCT_NAME, globToRegex, walkDir } from '../core/constants.js';
 
 // ── 镜像源注册表 ──
 const PIP_MIRRORS: Record<string, string> = {
@@ -167,29 +168,18 @@ registry.register(
     const results: string[] = [];
     let regex: RegExp;
     try { regex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"); } catch { regex = new RegExp(query, "i"); }
-    const walk = (dir: string) => {
+    walkDir(projectRoot, (full, entry) => {
       if (results.length >= 10) return;
+      if (!/\.(md|py|txt|json)$/.test(entry.name)) return;
       try {
-        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-          if (results.length >= 10) return;
-          if (entry.name.startsWith(".") || entry.name === "node_modules" || entry.name === "__pycache__" || entry.name === "cortex_workspace") continue;
-          const full = path.join(dir, entry.name);
-          if (entry.isDirectory()) {
-            walk(full);
-          } else if (/\.(md|py|txt|json)$/.test(entry.name)) {
-            try {
-              const lines = fs.readFileSync(full, "utf-8").split("\n");
-              for (let i = 0; i < lines.length; i++) {
-                if (regex.test(lines[i]) && results.length < 10) {
-                  results.push(`📄 ${path.relative(projectRoot, full)}\n     L${i + 1}: ${lines[i].trim().slice(0, 100)}`);
-                }
-              }
-            } catch { /* skip */ }
+        const lines = fs.readFileSync(full, "utf-8").split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          if (regex.test(lines[i]) && results.length < 10) {
+            results.push(`📄 ${path.relative(projectRoot, full)}\n     L${i + 1}: ${lines[i].trim().slice(0, 100)}`);
           }
         }
       } catch { /* skip */ }
-    };
-    walk(projectRoot);
+    }, 500);
     if (!results.length) return `(未找到与 '${query}' 相关的内容)`;
     return `搜索 '${query}' (${results.length} 条):\n\n` + results.join("\n");
   },
@@ -288,7 +278,7 @@ registry.register(
     const cmd = info.install;
     if (cmd.length > 0) {
       try {
-        const init = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "cortex-agent", version: "1.0" } } });
+        const init = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: PRODUCT_NAME, version: MCP_CLIENT_INFO.version } } });
         const notified = JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" });
         const listReq = JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
         const responses = await mcpExchange(cmd, [init, notified, listReq]);

@@ -13,8 +13,13 @@ import { registry } from '../core/registry.js';
 import { RiskLevel, Capability } from '../core/types.js';
 
 // ── 超时配置 ──
-const INACTIVITY_TIMEOUT = 30;   // 空闲超时（秒）：无输出超过此时间则判定卡死
-const MAX_TIMEOUT = 300;         // 硬上限（秒）：无论如何最多运行 5 分钟
+let INACTIVITY_TIMEOUT = 30;   // 空闲超时（秒）：无输出超过此时间则判定卡死
+const MAX_TIMEOUT = 300;       // 硬上限（秒）：无论如何最多运行 5 分钟
+
+/** 从 AgentConfig 同步 toolTimeout（与 Python set_tool_timeout 对齐） */
+export function setToolTimeout(seconds: number): void {
+  if (seconds > 0) INACTIVITY_TIMEOUT = seconds;
+}
 
 // ── 后台进程注册表 ──
 const _bgProcesses = new Map<number, { proc: any; command: string; startTime: number; logFile: string }>();
@@ -146,6 +151,10 @@ registry.register("执行系统命令", RiskLevel.SYSTEM, Capability.SHELL,
       /\b(php\s+-S)\b/i,
       /\b(rails\s+server|rails\s+s)\b/i,
       /\b(docker\s+run|docker-compose\s+up)\b/i,
+      // Go / Rust / Git daemon（与 Python 对齐）
+      /\b(go\s+run\s+)\b/i,
+      /\b(cargo\s+run\s+)\b/i,
+      /\b(git\s+daemon)\b/i,
     ];
     for (const pattern of blockingPatterns) {
       if (pattern.test(cmd)) {

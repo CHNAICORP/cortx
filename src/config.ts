@@ -40,7 +40,6 @@ export interface Settings {
   checkpoint_interval?: number;
   retry_max?: number;
   retry_base_delay?: number;
-  compact_threshold?: number;
   compact_input_pct?: number;
   compact_keep_recent?: number;
   max_steps?: number;

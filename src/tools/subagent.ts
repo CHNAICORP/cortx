@@ -12,13 +12,11 @@
 import { registry } from '../core/registry.js';
 import { RiskLevel, Capability } from '../core/types.js';
 import { getToolContext } from '../core/tool_context.js';
+import { truncateMiddle } from '../core/constants.js';
 
 /** 截断过长的子代理结果 */
 function truncateResult(result: string, maxLen = 5000): string {
-  if (result.length <= maxLen) return result;
-  const head = result.slice(0, Math.floor(maxLen * 0.7));
-  const tail = result.slice(-Math.floor(maxLen * 0.3));
-  return `${head}\n\n[...子代理结果已截断...]\n\n${tail}`;
+  return truncateMiddle(result, maxLen, 0.7);
 }
 
 registry.register(
