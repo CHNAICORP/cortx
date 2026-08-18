@@ -140,45 +140,54 @@ class HookManager:
             return (False, "", str(e))
 
     def run_pre_tool_use(self, ctx: HookContext) -> HookResult:
-        """执行 PreToolUse 钩子"""
+        """执行 PreToolUse 钩子（合并执行：所有匹配的钩子都触发）"""
         if not self._enabled:
             return HookResult()
+
+        block = False
+        message = ""
+        appends = []
 
         for hook in self.hooks["PreToolUse"]:
             if not self._match_pattern(hook.pattern, ctx.tool_name):
                 continue
             try:
+                import sys as _sys
+                _sys.stderr.write(f'  \x1b[90m[Hook] PreToolUse {hook.pattern} → {hook.command[:60]}\x1b[0m\n')
                 ok, stdout, stderr = self._exec_hook(hook.command, ctx, hook.timeout)
 
                 if not ok:
-                    return HookResult(
-                        block=True,
-                        message=f'[Hook 拦截] PreToolUse 钩子 "{hook.pattern}" 阻止了 {ctx.tool_name} 的执行'
-                                + (f": {stderr}" if stderr else ""),
-                    )
+                    block = True
+                    message = (f'[Hook 拦截] "{hook.pattern}" 阻止了 {ctx.tool_name}'
+                               + (f": {stderr}" if stderr else ""))
+                    break
                 if stdout:
-                    return HookResult(append=f"[Hook 提示] {stdout}")
+                    appends.append(f"[Hook 提示] {stdout}")
             except Exception as e:
-                return HookResult(append=f"[Hook 警告] 钩子执行失败: {e}")
+                appends.append(f"[Hook 警告] 钩子执行失败: {e}")
 
-        return HookResult()
+        return HookResult(block=block, message=message, append="\n".join(appends))
 
     def run_post_tool_use(self, ctx: HookContext) -> HookResult:
-        """执行 PostToolUse 钩子"""
+        """执行 PostToolUse 钩子（合并执行：所有匹配的钩子都触发）"""
         if not self._enabled:
             return HookResult()
+
+        appends = []
 
         for hook in self.hooks["PostToolUse"]:
             if not self._match_pattern(hook.pattern, ctx.tool_name):
                 continue
             try:
+                import sys as _sys
+                _sys.stderr.write(f'  \x1b[90m[Hook] PostToolUse {hook.pattern} → {hook.command[:60]}\x1b[0m\n')
                 ok, stdout, stderr = self._exec_hook(hook.command, ctx, hook.timeout)
 
                 if stdout:
-                    return HookResult(append=f"[Hook 后处理] {stdout}")
+                    appends.append(f"[Hook 后处理] {stdout}")
                 if stderr and not ok:
-                    return HookResult(append=f"[Hook 后处理警告] {stderr}")
+                    appends.append(f"[Hook 后处理警告] {stderr}")
             except Exception as e:
-                return HookResult(append=f"[Hook 后处理警告] 钩子执行失败: {e}")
+                appends.append(f"[Hook 后处理警告] 钩子执行失败: {e}")
 
-        return HookResult()
+        return HookResult(append="\n".join(appends))

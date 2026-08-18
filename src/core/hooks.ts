@@ -135,76 +135,63 @@ export class HookManager {
     return { status: result.status, stdout: (result.stdout || "").trim(), stderr: (result.stderr || "").trim() };
   }
 
-  /** 执行 PreToolUse 钩子 */
+  /** 执行 PreToolUse 钩子（合并执行：所有匹配的钩子都触发） */
   async runPreToolUse(ctx: HookContext): Promise<HookResult> {
     if (!this.enabled) return { block: false, message: "" };
+
+    let block = false;
+    let message = "";
+    const appends: string[] = [];
 
     for (const hook of this.hooks.PreToolUse) {
       if (!this.matchPattern(hook.pattern, ctx.toolName)) continue;
       try {
         const timeout = (hook.timeout || 30) * 1000;
-        const { status, stdout, stderr } = this.execHook(hook.command, ctx, timeout);
+        // 日志输出（stderr 不干扰 readline）
+        process.stderr.write(`  \x1b[90m[Hook] PreToolUse ${hook.pattern} → ${hook.command.slice(0, 60)}\x1b[0m\n`);
+        const { status, stdout, stderr: err } = this.execHook(hook.command, ctx, timeout);
 
         if (status !== 0) {
-          // 非零退出码 → 阻止执行
-          return {
-            block: true,
-            message: `[Hook 拦截] PreToolUse 钩子 "${hook.pattern}" 阻止了 ${ctx.toolName} 的执行${stderr ? `: ${stderr}` : ""}`,
-          };
+          // 非零退出码 → 阻止执行，停止后续钩子
+          block = true;
+          message = `[Hook 拦截] "${hook.pattern}" 阻止了 ${ctx.toolName}${err ? `: ${err}` : ""}`;
+          break;
         }
-        // stdout 非空 → 作为附加提示注入
+        // stdout 非空 → 累积为附加提示
         if (stdout) {
-          return {
-            block: false,
-            message: "",
-            append: `[Hook 提示] ${stdout}`,
-          };
+          appends.push(`[Hook 提示] ${stdout}`);
         }
       } catch (e) {
-        // 钩子执行失败不阻止工具执行，但记录警告
-        return {
-          block: false,
-          message: "",
-          append: `[Hook 警告] 钩子执行失败: ${e}`,
-        };
+        appends.push(`[Hook 警告] 钩子执行失败: ${e}`);
       }
     }
-    return { block: false, message: "" };
+    return { block, message, append: appends.join("\n") };
   }
 
-  /** 执行 PostToolUse 钩子 */
+  /** 执行 PostToolUse 钩子（合并执行：所有匹配的钩子都触发） */
   async runPostToolUse(ctx: HookContext): Promise<HookResult> {
     if (!this.enabled) return { block: false, message: "" };
+
+    const appends: string[] = [];
 
     for (const hook of this.hooks.PostToolUse) {
       if (!this.matchPattern(hook.pattern, ctx.toolName)) continue;
       try {
         const timeout = (hook.timeout || 30) * 1000;
-        const { status, stdout, stderr } = this.execHook(hook.command, ctx, timeout);
+        process.stderr.write(`  \x1b[90m[Hook] PostToolUse ${hook.pattern} → ${hook.command.slice(0, 60)}\x1b[0m\n`);
+        const { status, stdout, stderr: err } = this.execHook(hook.command, ctx, timeout);
 
         if (stdout) {
-          return {
-            block: false,
-            message: "",
-            append: `[Hook 后处理] ${stdout}`,
-          };
+          appends.push(`[Hook 后处理] ${stdout}`);
         }
-        if (stderr && status !== 0) {
-          return {
-            block: false,
-            message: "",
-            append: `[Hook 后处理警告] ${stderr}`,
-          };
+        if (err && status !== 0) {
+          appends.push(`[Hook 后处理警告] ${err}`);
         }
       } catch (e) {
-        return {
-          block: false,
-          message: "",
-          append: `[Hook 后处理警告] 钩子执行失败: ${e}`,
-        };
+        appends.push(`[Hook 后处理警告] 钩子执行失败: ${e}`);
       }
     }
-    return { block: false, message: "" };
+    return { block: false, message: "", append: appends.join("\n") };
   }
 
   /** 获取已注册钩子数量 */

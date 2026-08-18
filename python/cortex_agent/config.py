@@ -439,6 +439,20 @@ def create_default_settings(path: str) -> dict:
       "args": ["-y", "@upstash/context7-mcp"],
       "description": "实时库/框架文档查询"
     }
+  },
+
+  // ── Hooks 生命周期钩子（合并执行：所有匹配的钩子都触发）──
+  // PreToolUse: 工具执行前触发，非零退出码阻止执行
+  // PostToolUse: 工具执行后触发，stdout 注入到工具结果
+  // 环境变量: TOOL_NAME, TOOL_WORKDIR, TOOL_ARG_<PARAM>, TOOL_RESULT
+  "hooks": {
+    "PreToolUse": [
+      // { "pattern": "run_shell_command", "command": "echo '即将执行 shell 命令'", "timeout": 5 }
+    ],
+    "PostToolUse": [
+      // { "pattern": "write_file", "command": "echo '文件已写入'", "timeout": 5 }
+      // { "pattern": "write_*", "command": "npx prettier --write $TOOL_ARG_FILE_PATH", "timeout": 10 }
+    ]
   }
 }
 '''
