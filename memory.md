@@ -28,3 +28,5 @@
 - 抓取: https://blog.51cto.com/itchenhan/14088440
 - 抓取: https://juejin.cn/post/7436563499109335076
 - 查询: 用 spawn_subagents 并行派遣2个子代理：1搜索"2026年AI最新进展"并用web_fetch读取一个结果页面；2搜索"Python 3.13新
+- 查询: 联网搜索"SpaceX估值2026"（用 web_search 搜索一次，max_results 设为 8）。从搜索结果中提取 SpaceX 估值相关的最新信息
+- 搜索到: SpaceX估值能否突破2万亿美元？2026年最新估值与IPO目标全解析

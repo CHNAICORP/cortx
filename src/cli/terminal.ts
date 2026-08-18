@@ -314,11 +314,26 @@ export class SubagentTerminal {
   private toolCalls: SubagentToolCall[] = [];
   private step = 0;
   private answerFull = "";
+  private lastToolName = "";
+
+  // 子代理颜色循环（按 idx 分配不同色系）
+  private static readonly COLORS = [
+    "\x1b[38;5;75m",  // 蓝
+    "\x1b[38;5;114m", // 绿
+    "\x1b[38;5;209m", // 橙
+    "\x1b[38;5;141m", // 紫
+    "\x1b[38;5;220m", // 黄
+    "\x1b[38;5;198m", // 粉
+    "\x1b[38;5;81m",  // 青
+    "\x1b[38;5;173m", // 棕
+  ];
 
   constructor(idx: number, total: number, task: string) {
-    const label = task.length > 40 ? task.slice(0, 37) + "..." : task;
-    this.prefix = `  ${Terminal.GRAY}  └ [${idx}/${total}]${Terminal.RESET}`;
-    process.stdout.write(`${this.prefix} ${Terminal.DIM}▶ ${label}${Terminal.RESET}\n`);
+    const color = SubagentTerminal.COLORS[(idx - 1) % SubagentTerminal.COLORS.length];
+    const label = task.length > 50 ? task.slice(0, 47) + "..." : task;
+    this.prefix = `  ${color}  └ [${idx}/${total}]\x1b[0m`;
+    // 派遣行：带颜色前缀 + 任务描述
+    process.stdout.write(`${this.prefix} ${color}▶\x1b[0m ${Terminal.DIM}${label}${Terminal.RESET}\n`);
   }
 
   write(s: string) { process.stdout.write(s); }
@@ -338,20 +353,32 @@ export class SubagentTerminal {
 
   toolStart(name: string, args: Record<string, unknown>) {
     this.step++;
-    const argsStr = fmtArgs(args);
-    process.stdout.write(`${this.prefix} ${Terminal.CYAN}▸ ${name}${Terminal.RESET} ${Terminal.DIM}(${argsStr})${Terminal.RESET}`);
+    this.lastToolName = name;
+    // 截断参数显示：只保留前 2 个关键参数，每个最长 30 字符
+    const argParts: string[] = [];
+    let count = 0;
+    for (const [k, v] of Object.entries(args)) {
+      if (k === "workDir" || k === "work_dir") continue;
+      let s = String(v);
+      if (s.length > 30) s = s.slice(0, 27) + "...";
+      argParts.push(`${k}=${s}`);
+      if (++count >= 2) break;
+    }
+    const argsStr = argParts.join(", ");
+    // 完整一行 + 换行（防止并行输出交叉）
+    process.stdout.write(`${this.prefix} ${Terminal.CYAN}▸ ${name}\x1b[0m ${Terminal.DIM}(${argsStr})${Terminal.RESET}\n`);
   }
 
   toolDone(success: boolean, latencyMs: number, preview: string) {
     const icon = success ? `${Terminal.GREEN}✓${Terminal.RESET}` : `${Terminal.RED}✗${Terminal.RESET}`;
-    const short = preview.replace(/\n/g, " ").trim().slice(0, 60);
-    process.stdout.write(` ${icon} ${Terminal.GRAY}[${latencyMs.toFixed(0)}ms]${Terminal.RESET} ${Terminal.DIM}${short}${Terminal.RESET}\n`);
+    // 结果预览：取第一行有意义的内容，最多 70 字符
+    const short = preview.replace(/\n/g, " ").trim().slice(0, 70);
+    // 独立一行结果（带换行，防止交叉）
+    process.stdout.write(`${this.prefix}   ${icon} ${Terminal.GRAY}[${(latencyMs/1000).toFixed(1)}s]${Terminal.RESET} ${Terminal.DIM}${short}${Terminal.RESET}\n`);
     // 记录工具调用
     this.toolCalls.push({
-      name: "", args: {}, result: preview, success, latencyMs,
+      name: this.lastToolName, args: {}, result: preview, success, latencyMs,
     });
-    // 更新最后一个的工具名
-    if (this.toolCalls.length > 0) this.toolCalls[this.toolCalls.length - 1].name = "";
   }
 
   /** 记录工具调用详情（供 /subagent <id> 查看） */
@@ -361,7 +388,7 @@ export class SubagentTerminal {
 
   /** 输出最终摘要 */
   flush() {
-    const preview = this.answerFull.replace(/\n/g, " ").trim().slice(0, 80);
+    const preview = this.answerFull.replace(/\n/g, " ").trim().slice(0, 100);
     if (preview) {
       process.stdout.write(`${this.prefix} ${Terminal.DIM}📋 ${preview}${Terminal.RESET}\n`);
     }
