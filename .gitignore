@@ -46,3 +46,13 @@ dist/
 node_modules/
 .npmrc
 *.tgz
+
+# Test artifacts (archived)
+cortx-demo-breakout/
+cortx-demo-shop-app/
+cortx-demo-shop-app.zip
+test_office/
+test_design/
+.bg_log_*
+.zcode/
+tmp_llms.txt
