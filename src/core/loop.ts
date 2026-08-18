@@ -101,20 +101,53 @@ const DEFAULT_SYSTEM = [
   "  4. **验证完成后** 使用 stop_background_process 停止后台进程",
   "  示例流程：",
   "    run_background_command(command='python app.py')  → 返回 PID",
-  "    check_server_status(url='http://localhost:5000/api/health')  → 验证服务",
+  "    check_server_status(url='http://localhost:5000/api/health')  → 验证服务（自动重试3次）",
   "    stop_background_process(pid=12345)  → 清理进程",
+  "",
+  "  ⚠ Windows 环境使用 PowerShell，命令分隔符用 ;（不要用 && 或 &）",
+  "",
+  "== 验证策略（重要）==",
+  "你的模型可能不支持图像识别。验证结果时优先使用文本方式，不要依赖截图：",
+  "  - 页面验证：用 browser_snapshot() 获取页面文本，而非 browser_screenshot()",
+  "  - 服务验证：用 check_server_status(url=...) 发送 HTTP 请求验证响应",
+  "  - 代码验证：用 run_shell_command 运行测试/编译，用 grep/read_file 检查代码",
+  "  - 文件验证：用 read_file 读取文件内容确认结果",
+  "⚠️ 截图工具仅保存图片到文件，文本模型无法识别内容。连续截图 2 次仍无法确认时，立即切换文本验证。",
   "",
   "联网搜索或查询实时信息前，先调用 get_current_time 获取当前时间以确保时效性。",
   "搜索时务必将获取到的具体年份和月份直接写入搜索关键词中。",
+  "",
+  "== 技能系统 (Skills) ==",
+  "你拥有技能系统。技能是可复用的专家级指引模板，能为特定任务提供专业方法论（如代码审查、PPT 制作、Office 文档处理、安全审计等）。",
+  "  - 调用 list_skills() 查看所有可用技能（内置 + 项目 .cortx/skills/ 下的自定义技能）",
+  "  - 调用 use_skill(name=\"技能名\") 加载某技能的完整指引到上下文",
+  "  - 调用 skill_install(source=\"owner/repo\") 从 GitHub 安装新技能，自动注册立即可用",
+  "  - 调用 skill_remove(name=\"技能名\") 删除已安装的自定义技能",
+  "当用户任务匹配某个技能领域时，先 list_skills 查看，再用 use_skill 加载对应技能的指引，然后按指引执行任务。",
+  "",
+  "== 子代理系统 (Subagents) ==",
+  "你可以派遣子代理执行独立任务，子代理拥有独立的上下文，执行完毕后返回结果摘要，不污染主对话。",
+  "  - spawn_subagent(task=\"任务描述\") — 派遣单个子代理",
+  '  - spawn_subagents(tasks_json=\'[{"task":"任务1"},{"task":"任务2"}]\') — 并行派遣多个子代理（fan-out）',
+  "",
+  "子代理支持可选参数：",
+  "  - tools: 限制子代理可用的工具（逗号分隔，如 \"read_file,grep,glob\"）",
+  "  - skill: 预加载技能（如 \"code-review\"），技能指引注入子代理上下文",
+  "",
+  "适用场景：大规模代码分析（拆分为多个子任务并行）、多维度审查（安全/性能/测试分别由不同子代理检查）、",
+  "独立研究任务（避免大量中间结果占用主上下文）。复杂任务优先考虑用 spawn_subagents 并行拆分。",
+  "",
+  "主动派遣时机：任务涉及 3+ 个独立模块分析、需要多维度审查（安全+性能+测试）、或用户要求「全面/多维度」分析时，",
+  "主动用 spawn_subagents 并行拆分。单文件简单审查则直接做，不必派遣。",
 ].join("\n");
 
 // ── ContextGovernor ──
 export class ContextGovernor {
   static TOKENS_PER_CHAR = 0.4;
   /** 工具结果压缩阈值（字符数） */
-  static COMPRESS_THRESHOLD = 1500;
-  static COMPRESS_HEAD = 600;
-  static COMPRESS_TAIL = 400;
+  static COMPRESS_THRESHOLD = 6000;
+  static COMPRESS_HEAD = 2400;
+  static COMPRESS_TAIL = 1600;
   /** 安全余量：预留给 tokenizer 估算误差 + tool schema 开销 */
   static SAFETY_MARGIN = 4096;
   /** 输入 token 预警线（占 maxInputTokens 的百分比） */
@@ -232,7 +265,7 @@ export class ContextGovernor {
     const filesTouched = new Set<string>();
     for (const m of old) {
       if (m.role === "user") {
-        const content = (m.content || "").slice(0, 120);
+        const content = (m.content || "").slice(0, 200);
         if (content.trim()) summaryParts.push(`用户请求: ${content}`);
       } else if (m.role === "assistant") {
         if (m.tool_calls) {
@@ -248,12 +281,12 @@ export class ContextGovernor {
             } catch { /* ignore */ }
           }
         }
-        const content = (m.content || "").slice(0, 80);
+        const content = (m.content || "").slice(0, 150);
         if (content.trim()) summaryParts.push(`Agent: ${content}`);
       } else if (m.role === "tool") {
         const content = m.content || "";
         if (content.length > 100) {
-          summaryParts.push(`  → 结果(${content.length}字符): ${content.slice(0, 80)}...`);
+          summaryParts.push(`  → 结果(${content.length}字符): ${content.slice(0, 200)}...`);
         }
       }
     }
@@ -270,7 +303,7 @@ export class ContextGovernor {
     }
     if (summaryParts.length > 0) {
       let body = summaryParts.slice(-20).join("\n");
-      if (body.length > 2000) body = body.slice(0, 2000) + "...";
+      if (body.length > 3000) body = body.slice(0, 3000) + "...";
       compactText += `对话摘要:\n${body}\n`;
     }
 
@@ -400,7 +433,7 @@ class Observer {
 
 // ── ToolExecutor ──
 export class ToolExecutor {
-  static MAX_RESULT_CHARS = 10000;
+  static MAX_RESULT_CHARS = 50000;
   private reg: typeof registry;
   private workDir: string;
   private timeout: number;
@@ -472,6 +505,7 @@ export class CortexAgent {
   private lastLlmError = "";
   private rejectionCounts = new Map<Capability, number>();
   private suspendedCaps = new Set<Capability>();
+  private _screenshotStreak = 0;
   private permissionDecisions = new Map<string, boolean>();
   private sessionId: string | null = null;
   private queryCount = 0;
@@ -494,6 +528,9 @@ export class CortexAgent {
     codeStream: (filePath: string, content: string) => Promise<void>;
     isAnswerShown: () => boolean;
     writeAnswer: (text: string) => void;
+    subagentDispatch?: (count: number) => void;
+    subagentStart?: (idx: number, total: number, task: string) => void;
+    subagentDone?: (idx: number, total: number, success: boolean, latencyMs?: number) => void;
   } | null = null;
 
   setTerm(t: typeof this.term) { this.term = t; }
@@ -538,12 +575,43 @@ this._skillMgr = new SkillManager(this.config.workDir);
     this._setupToolContext();
   }
 
+  /** 创建并运行单个子代理（不含进度显示，供 spawnSubagent / spawnSubagents 复用） */
+  private async _runSubagent(task: string, model?: string, tools?: string, skill?: string): Promise<string> {
+    // 预加载技能：将技能 prompt 前置注入任务
+    let effectiveTask = task;
+    if (skill && this._skillMgr) {
+      const skillObj = this._skillMgr.get(skill);
+      if (skillObj) {
+        effectiveTask = skillObj.toPrompt() + "\n\n---\n\n任务: " + task;
+      }
+    }
+    const subConfig: Partial<AgentConfig> = {
+      ...this.config,
+      model: model ? LLMProvider.resolve(model) : this.config.model,
+      maxSteps: 20,
+      maxRounds: 1,
+    };
+    const subAgent = new CortexAgent(subConfig);
+    subAgent._nonInteractive = true;
+    subAgent._hooks = this._hooks;
+    if (tools) {
+      const toolsList = tools.split(",").map(t => t.trim()).filter(Boolean);
+      subAgent.setToolFilter(toolsList, null);
+    } else {
+      subAgent._allowedTools = this._allowedTools;
+      subAgent._disallowedTools = this._disallowedTools;
+    }
+    subAgent._setupToolContext();
+    return await subAgent.run(effectiveTask);
+  }
+
   /** 设置工具上下文（供 ask_user, spawn_subagent 等工具使用） */
   private _setupToolContext(): void {
     setToolContext({
       workDir: this.config.workDir,
       nonInteractive: this._nonInteractive,
       agentConfig: this.config as unknown as Record<string, unknown>,
+      skillManager: this._skillMgr ?? undefined,
       askUser: async (question: string): Promise<string> => {
         if (this._nonInteractive || !this.term) {
           return `[非交互模式] ${question}`;
@@ -559,20 +627,75 @@ this._skillMgr = new SkillManager(this.config.workDir);
           return "(用户未响应)";
         }
       },
-      spawnSubagent: async (task: string, model?: string): Promise<string> => {
-        const subConfig: Partial<AgentConfig> = {
-          ...this.config,
-          model: model ? LLMProvider.resolve(model) : this.config.model,
-          maxSteps: 20, // 子代理限制步数
-          maxRounds: 1,  // 子代理不续行
+      spawnSubagent: async (task: string, model?: string, tools?: string, skill?: string): Promise<string> => {
+        const label = skill ? `[${skill}] ${task}` : task;
+        if (this.term) {
+          this.term.subagentDispatch?.(1);
+          this.term.subagentStart?.(1, 1, label);
+        }
+        const t0 = Date.now();
+        try {
+          const result = await this._runSubagent(task, model, tools, skill);
+          if (this.term) this.term.subagentDone?.(1, 1, true, Date.now() - t0);
+          return result;
+        } catch (e) {
+          if (this.term) this.term.subagentDone?.(1, 1, false, Date.now() - t0);
+          throw e;
+        }
+      },
+      spawnSubagents: async (tasksJson: string): Promise<string> => {
+        let tasks: unknown[];
+        try {
+          tasks = JSON.parse(tasksJson);
+        } catch (e) {
+          return `(x) tasks_json 解析失败: ${e}`;
+        }
+        if (!Array.isArray(tasks) || tasks.length === 0) {
+          return "(x) tasks_json 必须是非空 JSON 数组";
+        }
+        const n = tasks.length;
+        if (this.term) this.term.subagentDispatch?.(n);
+        const runOne = async (idx: number): Promise<[number, string]> => {
+          const td = tasks[idx];
+          const isObj = typeof td === "object" && td !== null;
+          const t = isObj ? String((td as Record<string, unknown>).task || "") : String(td);
+          const m = isObj ? String((td as Record<string, unknown>).model || "") : "";
+          const tl = isObj ? String((td as Record<string, unknown>).tools || "") : "";
+          const sk = isObj ? String((td as Record<string, unknown>).skill || "") : "";
+          const label = sk ? `[${sk}] ${t}` : t;
+          if (this.term) this.term.subagentStart?.(idx + 1, n, label);
+          const t0 = Date.now();
+          try {
+            const r = await this._runSubagent(t, m || undefined, tl || undefined, sk || undefined);
+            if (this.term) this.term.subagentDone?.(idx + 1, n, true, Date.now() - t0);
+            return [idx, r || "(子代理未返回结果)"];
+          } catch (e) {
+            if (this.term) this.term.subagentDone?.(idx + 1, n, false, Date.now() - t0);
+            return [idx, `(x) 子代理执行失败: ${e}`];
+          }
         };
-        const subAgent = new CortexAgent(subConfig);
-        subAgent._nonInteractive = true;
-        subAgent._hooks = this._hooks; // 共享 hooks
-        subAgent._allowedTools = this._allowedTools;
-        subAgent._disallowedTools = this._disallowedTools;
-        subAgent._setupToolContext();
-        return await subAgent.run(task);
+        // 并行执行所有子代理
+        const settled = await Promise.all(tasks.map((_, i) => runOne(i)));
+        const results: string[] = new Array(n).fill("");
+        for (const [idx, r] of settled) results[idx] = r;
+
+        const lines: string[] = [];
+        for (let i = 0; i < n; i++) {
+          const td = tasks[i];
+          const isObj = typeof td === "object" && td !== null;
+          const t = isObj ? String((td as Record<string, unknown>).task || "") : String(td);
+          lines.push(`[子代理 ${i + 1}/${n}]`);
+          lines.push(`任务: ${t}`);
+          if (isObj) {
+            const obj = td as Record<string, unknown>;
+            if (obj.tools) lines.push(`工具限制: ${obj.tools}`);
+            if (obj.skill) lines.push(`预载技能: ${obj.skill}`);
+          }
+          lines.push("---");
+          lines.push(results[i]);
+          lines.push("");
+        }
+        return lines.join("\n").trim();
       },
     });
   }
@@ -782,6 +905,7 @@ this._skillMgr = new SkillManager(this.config.workDir);
     } else {
       this.ctx = this.governor.appendUser(this.ctx, query);
     }
+    this._screenshotStreak = 0; // 重置截图计数器
     // ── Auto-inject relevant skills based on user query ──
     this._autoInjectSkills(query);
     const result = await this._loop(maxSteps || this.config.maxSteps);
@@ -1198,6 +1322,16 @@ this._skillMgr = new SkillManager(this.config.workDir);
         const latency = Date.now() - t0;
         if (this.term) this.term.toolDone(ok, latency, result);
         this.observer.record(this.trace, stepNo, tc.name, tc.args, result, ok, capStr, latency);
+        // ── 截图循环检测：文本模型无法识图，连续截图时注入警告 ──
+        if (tc.name === "browser_screenshot" || tc.name === "computer_screenshot") {
+          this._screenshotStreak++;
+          if (this._screenshotStreak >= 3) {
+            result += `\n\n⚠️ [系统警告] 你已连续截图 ${this._screenshotStreak} 次，但文本模型无法识别图片内容。`
+              + `请立即切换到文本验证方式：browser_snapshot() 获取页面文本、check_server_status() 验证服务、read_file/grep 检查代码。`;
+          }
+        } else {
+          this._screenshotStreak = 0;
+        }
         // 写入时定长压缩（一次性；写入后字节不变 → 前缀缓存稳定）
         this.ctx.push({ role: "tool", tool_call_id: tc.id, content: this.governor.finalizeToolResult(result) });
       }

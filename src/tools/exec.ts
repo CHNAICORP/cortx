@@ -153,8 +153,10 @@ registry.register("执行系统命令", RiskLevel.SYSTEM, Capability.SHELL,
       }
     }
     const isWin = process.platform === "win32";
+    // PowerShell 5.x 不支持 &&，自动转换为 ; 避免语法错误
+    const effectiveCmd = isWin ? cmd.replace(/&&/g, ';') : cmd;
     const cmdArgs = isWin
-      ? ["-NoProfile", "-NonInteractive", "-Command", cmd]
+      ? ["-NoProfile", "-NonInteractive", "-Command", effectiveCmd]
       : ["-c", cmd];
     const exe = isWin ? "powershell" : "bash";
 
@@ -279,7 +281,7 @@ registry.register(
     const logFile = path.join(workDir, `.bg_log_${Date.now()}.txt`);
 
     const cmdArgs = isWin
-      ? ["-NoProfile", "-NonInteractive", "-Command", cmd]
+      ? ["-NoProfile", "-NonInteractive", "-Command", cmd.replace(/&&/g, ';')]
       : ["-c", cmd];
     const exe = isWin ? "powershell" : "bash";
 
@@ -307,7 +309,7 @@ registry.register(
         return `(x) 后台进程启动后立即退出 (exit=${proc.exitCode})\n命令: ${cmd}\n日志:\n${logContent}`;
       }
 
-      return `✅ 后台进程已启动 (PID=${pid})\n命令: ${cmd}\n日志: ${logFile}\n提示: 使用 check_server_status 验证服务是否正常运行\n      使用 stop_background_process(pid=${pid}) 停止进程`;
+      return `✅ 后台进程已启动 (PID=${pid})\n命令: ${cmd}\n日志: ${logFile}\n提示: 等待 2-3 秒后使用 check_server_status 验证（自动重试3次）\n      使用 stop_background_process(pid=${pid}) 停止进程`;
     } catch (e) { return `(x) 后台启动失败: ${e}`; }
   },
 );
@@ -326,19 +328,29 @@ registry.register(
       return `(x) 安全限制：check_server_status 仅允许检查本地服务 (localhost/127.0.0.1)\nURL: ${url}`;
     }
 
-    try {
-      const resp = await fetch(url, { signal: AbortSignal.timeout(timeout), headers: { "User-Agent": "CortexAgent/HealthCheck" } });
-      const body = await resp.text();
-      const ok = resp.status === expectedStatus;
-      const icon = ok ? "✅" : "⚠";
-      return `${icon} 服务正常运行\nURL: ${url}\nHTTP 状态码: ${resp.status} (期望: ${expectedStatus})\n响应体预览: ${body.slice(0, 200)}`;
-    } catch (e: any) {
-      const msg = String(e?.message || e);
-      if (msg.includes("ECONNREFUSED") || msg.includes("fetch failed")) {
-        return `(x) 服务未启动或端口未监听\nURL: ${url}\n可能的原因:\n  1. 服务器进程未成功启动\n  2. 服务器正在启动中，尚未就绪\n  3. 端口号错误\n建议: 检查后台进程日志，或等待几秒后重试`;
+    // 自动重试：服务器可能需要几秒才能就绪
+    const maxRetries = 3;
+    const retryDelay = 1500;
+    let lastErr = "";
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const resp = await fetch(url, { signal: AbortSignal.timeout(timeout), headers: { "User-Agent": "CortexAgent/HealthCheck" } });
+        const body = await resp.text();
+        const ok = resp.status === expectedStatus;
+        const icon = ok ? "✅" : "⚠";
+        const retryNote = attempt > 1 ? ` (第${attempt}次尝试成功)` : "";
+        return `${icon} 服务正常运行${retryNote}\nURL: ${url}\nHTTP 状态码: ${resp.status} (期望: ${expectedStatus})\n响应体预览: ${body.slice(0, 200)}`;
+      } catch (e: any) {
+        const msg = String(e?.message || e);
+        lastErr = msg;
+        if (attempt < maxRetries && (msg.includes("ECONNREFUSED") || msg.includes("fetch failed"))) {
+          await new Promise(r => setTimeout(r, retryDelay));
+          continue;
+        }
       }
-      return `(x) 检查失败: ${msg}\nURL: ${url}`;
     }
+    return `(x) 服务未启动或端口未监听（已重试 ${maxRetries} 次）\nURL: ${url}\n可能的原因:\n  1. 服务器进程未成功启动\n  2. 服务器正在启动中，尚未就绪\n  3. 端口号错误\n建议: 检查后台进程日志 (list_background_processes + read_file 查看日志)`;
   },
 );
 

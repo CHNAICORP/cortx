@@ -375,28 +375,20 @@ registry.register(
   { workDir: "string" },
   function list_tools(): string {
     const schemas = registry.schemas;
-    const lines: string[] = [`=== 已注册工具 (${schemas.length} 个) ===\n`];
+    const lines: string[] = [`=== 已注册工具 (${schemas.length} 个) ===`];
     for (const s of schemas) {
       const fn = s.function;
       const name = fn.name;
-      const desc = (fn.description || "").split("\n")[0].slice(0, 100);
+      const desc = (fn.description || "").split("\n")[0].slice(0, 70);
       const params = (fn.parameters as any).properties || {};
       const required: string[] = (fn.parameters as any).required || [];
       const meta = registry.meta(name);
       const riskStr = meta ? meta.risk.toString().split(".").pop() : "?";
-      const capStr = meta ? meta.capability : "?";
-      const paramParts: string[] = [];
-      for (const [pname, pinfo] of Object.entries(params)) {
-        const ptype = (pinfo as any).type || "?";
-        const req = required.includes(pname) ? "必填" : "可选";
-        paramParts.push(`${pname}(${ptype},${req})`);
-      }
-      const paramsStr = paramParts.length ? paramParts.join(", ") : "无参数";
-      lines.push(`  ● ${name}`);
-      lines.push(`    描述: ${desc}`);
-      lines.push(`    风险: ${riskStr} | 能力: ${capStr}`);
-      lines.push(`    参数: ${paramsStr}`);
-      lines.push("");
+      const paramNames = Object.keys(params).filter(p => p !== "workDir" && p !== "work_dir");
+      const paramsStr = paramNames.length
+        ? paramNames.map(p => required.includes(p) ? `${p}*` : p).join(", ")
+        : "无参数";
+      lines.push(`  • ${name} — ${desc} [${riskStr}] (${paramsStr})`);
     }
     return lines.join("\n");
   },

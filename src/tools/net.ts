@@ -446,7 +446,12 @@ registry.register("HTTP请求", RiskLevel.SAFE, Capability.NET_HTTP,
         const [ok, reason] = await checkSsrf(url);
         if (!ok) return `(x) ${reason}`;
       }
-      const resp = await fetch(url, { method, body: args["body"] ? String(args["body"]) : undefined });
+      const headers: Record<string, string> = {};
+      const headersRaw = String(args["headers"] || "");
+      if (headersRaw) {
+        try { Object.assign(headers, JSON.parse(headersRaw)); } catch { /* ignore malformed */ }
+      }
+      const resp = await fetch(url, { method, body: args["body"] ? String(args["body"]) : undefined, headers });
       return `HTTP ${resp.status}\n${(await resp.text()).slice(0, 2000)}`;
     } catch (e) { return `(x) ${e}`; }
   },

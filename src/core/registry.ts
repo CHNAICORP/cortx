@@ -55,7 +55,13 @@ class ToolRegistry {
     };
 
     this.tools.set(name, { fn, meta, schema });
-    this.schemas.push(schema);
+    // 去重：如果同名工具已注册，替换而非追加到 schemas 数组
+    const existingIdx = this.schemas.findIndex(s => s.function.name === name);
+    if (existingIdx >= 0) {
+      this.schemas[existingIdx] = schema;
+    } else {
+      this.schemas.push(schema);
+    }
   }
 
   get(name: string): ToolFn | undefined {

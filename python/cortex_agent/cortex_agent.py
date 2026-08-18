@@ -183,11 +183,11 @@ class ToolExecutor:
     """工具执行器 — 隔离执行 + 智能结果截断。
 
     截断策略（参考 Claude Code tool result handling）:
-      - 默认截断到 10000 字符（可在 settings.json 中通过 max_result_chars 自定义）
+      - 默认截断到 50000 字符（可在 settings.json 中通过 max_result_chars 自定义）
       - 保留首尾内容，中间用省略标记
       - Python 沙箱输出单独截断
     """
-    MAX_RESULT_CHARS = 10000  # 类常量保留作为默认值和向后兼容
+    MAX_RESULT_CHARS = 50000  # 类常量保留作为默认值和向后兼容
 
     def __init__(self, registry: 'ToolRegistry', work_dir: str, timeout: int = 0, max_result_chars: int = 0):
         self.reg = registry; self.work_dir = work_dir; self.timeout = timeout
@@ -293,10 +293,36 @@ DEFAULT_SYSTEM = (
     "  4. **验证完成后** 使用 stop_background_process 停止后台进程\n"
     "  示例流程：\n"
     "    run_background_command(command='python app.py')  → 返回 PID\n"
-    "    check_server_status(url='http://localhost:5000/api/health')  → 验证服务\n"
-    "    stop_background_process(pid=12345)  → 清理进程\n\n"
+    "    check_server_status(url='http://localhost:5000/api/health')  → 验证服务（自动重试3次）\n"
+    "    stop_background_process(pid=12345)  → 清理进程\n"
+    "  ⚠ Windows 环境使用 PowerShell，命令分隔符用 ;（不要用 && 或 &）\n\n"
+    "== 验证策略（重要）==\n"
+    "你的模型可能不支持图像识别。验证结果时优先使用文本方式，不要依赖截图：\n"
+    "  - 页面验证：用 browser_snapshot() 获取页面文本，而非 browser_screenshot()\n"
+    "  - 服务验证：用 check_server_status(url=...) 发送 HTTP 请求验证响应\n"
+    "  - 代码验证：用 run_shell_command 运行测试/编译，用 grep/read_file 检查代码\n"
+    "  - 文件验证：用 read_file 读取文件内容确认结果\n"
+    "⚠️ 截图工具仅保存图片到文件，文本模型无法识别内容。连续截图 2 次仍无法确认时，立即切换文本验证。\n\n"
     "联网搜索或查询实时信息前，先调用 get_current_time 获取当前时间以确保时效性。\n"
-    "搜索时务必将获取到的具体年份和月份直接写入搜索关键词中。"
+    "搜索时务必将获取到的具体年份和月份直接写入搜索关键词中。\n\n"
+    "== 技能系统 (Skills) ==\n"
+    "你拥有技能系统。技能是可复用的专家级指引模板，能为特定任务提供专业方法论（如代码审查、PPT 制作、Office 文档处理、安全审计等）。\n"
+    "  - 调用 list_skills() 查看所有可用技能（内置 + 项目 .cortx/skills/ 下的自定义技能）\n"
+    "  - 调用 use_skill(name=\"技能名\") 加载某技能的完整指引到上下文\n"
+    "  - 调用 skill_install(source=\"owner/repo\") 从 GitHub 安装新技能，自动注册立即可用\n"
+    "  - 调用 skill_remove(name=\"技能名\") 删除已安装的自定义技能\n"
+    "当用户任务匹配某个技能领域时，先 list_skills 查看，再用 use_skill 加载对应技能的指引，然后按指引执行任务。\n\n"
+    "== 子代理系统 (Subagents) ==\n"
+    "你可以派遣子代理执行独立任务，子代理拥有独立的上下文，执行完毕后返回结果摘要，不污染主对话。\n"
+    "  - spawn_subagent(task=\"任务描述\") — 派遣单个子代理\n"
+    "  - spawn_subagents(tasks_json='[{\"task\":\"任务1\"},{\"task\":\"任务2\"}]') — 并行派遣多个子代理（fan-out）\n\n"
+    "子代理支持可选参数：\n"
+    "  - tools: 限制子代理可用的工具（逗号分隔，如 \"read_file,grep,glob\"）\n"
+    "  - skill: 预加载技能（如 \"code-review\"），技能指引注入子代理上下文\n\n"
+    "适用场景：大规模代码分析（拆分为多个子任务并行）、多维度审查（安全/性能/测试分别由不同子代理检查）、\n"
+    "独立研究任务（避免大量中间结果占用主上下文）。复杂任务优先考虑用 spawn_subagents 并行拆分。\n\n"
+    "主动派遣时机：任务涉及 3+ 个独立模块分析、需要多维度审查（安全+性能+测试）、或用户要求「全面/多维度」分析时，\n"
+    "主动用 spawn_subagents 并行拆分。单文件简单审查则直接做，不必派遣。"
 )
 
 class ContextGovernor:
@@ -316,9 +342,9 @@ class ContextGovernor:
     TOKENS_PER_CHAR = 0.4  # 混合中英文经验值
     CONTEXT_LIMIT_TOKENS = 1_000_000
     # 工具结果压缩阈值（字符数）
-    COMPRESS_THRESHOLD = 1500
-    COMPRESS_HEAD = 600
-    COMPRESS_TAIL = 400
+    COMPRESS_THRESHOLD = 6000
+    COMPRESS_HEAD = 2400
+    COMPRESS_TAIL = 1600
     # 安全余量：预留给 tokenizer 估算误差 + tool schema 开销
     SAFETY_MARGIN = 4096
     # 输入 token 预警线（占 max_input_tokens 的百分比）
@@ -555,7 +581,7 @@ class ContextGovernor:
         for m in old:
             role = m.get("role", "")
             if role == "user":
-                content = (m.get("content") or "")[:120]
+                content = (m.get("content") or "")[:200]
                 if content.strip():
                     summary_parts.append(f"用户请求: {content}")
             elif role == "assistant":
@@ -573,13 +599,13 @@ class ContextGovernor:
                                 files_touched.add(v[:80])
                     except (json.JSONDecodeError, TypeError):
                         pass
-                content = (m.get("content") or "")[:80]
+                content = (m.get("content") or "")[:150]
                 if content.strip():
                     summary_parts.append(f"Agent: {content}")
             elif role == "tool":
                 content = m.get("content", "")
                 if isinstance(content, str) and len(content) > 100:
-                    summary_parts.append(f"  → 结果({len(content)}字符): {content[:80]}...")
+                    summary_parts.append(f"  → 结果({len(content)}字符): {content[:200]}...")
 
         # 构建压缩摘要
         compact_text = f"[上下文压缩 — {len(old)}条消息已摘要]\n"
@@ -594,8 +620,8 @@ class ContextGovernor:
         if summary_parts:
             # 限制摘要长度
             compact_body = "\n".join(summary_parts[-20:])  # 最多 20 条摘要
-            if len(compact_body) > 2000:
-                compact_body = compact_body[:2000] + "..."
+            if len(compact_body) > 3000:
+                compact_body = compact_body[:3000] + "..."
             compact_text += f"对话摘要:\n{compact_body}\n"
 
         result = []
@@ -645,14 +671,14 @@ class AgentConfig:
     max_tokens: int = 0                # 0=自动从模型能力注册表解析
     max_input_tokens: int = 0          # 0=自动计算: context_limit - max_tokens - safety_margin
     # ── ContextGovernor 可调参数 (均可在 settings.json 中自定义) ──
-    compress_threshold: int = 1500     # tool result 压缩阈值（字符数）
-    compress_head: int = 600           # 压缩时保留的首部字符数
-    compress_tail: int = 400           # 压缩时保留的尾部字符数
+    compress_threshold: int = 6000     # tool result 压缩阈值（字符数）
+    compress_head: int = 2400          # 压缩时保留的首部字符数
+    compress_tail: int = 1600          # 压缩时保留的尾部字符数
     safety_margin: int = 4096          # tokenizer 估算误差 + tool schema 开销的安全余量
     input_warn_pct: int = 80           # 输入 token 占比达此百分比时触发 WARN 压缩
     input_force_pct: int = 90          # 输入 token 占比达此百分比时触发 FORCE 裁剪
     # ── ToolExecutor 可调参数 ──
-    max_result_chars: int = 10000      # 工具结果截断阈值（支持大代码文件查看）
+    max_result_chars: int = 50000      # 工具结果截断阈值（支持大代码文件查看）
     # ── Memory 注入控制 ──
     memory_inject_count: int = 30      # 注入 system prompt 的最大记忆条数
 
@@ -733,6 +759,7 @@ class CortexAgent:
         # ── Tool whitelist/blacklist ──
         self._allowed_tools: Optional[set] = None
         self._disallowed_tools: Optional[set] = None
+        self._screenshot_streak = 0
         # ── Non-interactive mode (pipe/CI) ──
         self._non_interactive: bool = False
         # ── Setup tool context ──
@@ -912,6 +939,7 @@ class CortexAgent:
             self._ctx = self.governor.init(query)
         else:
             self._ctx = self.governor.append_user(self._ctx, query)
+        self._screenshot_streak = 0  # 重置截图计数器
         # ── Auto-inject relevant skills based on user query ──
         self._auto_inject_skills(query)
         result = self._loop(max_steps or self.config.max_steps)
@@ -1100,7 +1128,13 @@ class CortexAgent:
             except Exception:
                 return "(用户未响应)"
 
-        def spawn_subagent_handler(task: str, model: str = "") -> str:
+        def spawn_subagent_handler(task: str, model: str = "",
+                                   tools: str = "", skill: str = "") -> str:
+            # 预加载技能：将技能 prompt 前置注入任务
+            if skill and self.skill_mgr:
+                skill_obj = self.skill_mgr.get(skill)
+                if skill_obj:
+                    task = skill_obj.to_prompt() + "\n\n---\n\n任务: " + task
             sub_config = AgentConfig(
                 api_key=self.config.api_key,
                 base_url=self.config.base_url,
@@ -1112,16 +1146,68 @@ class CortexAgent:
             sub_agent = CortexAgent(sub_config)
             sub_agent._non_interactive = True
             sub_agent._hooks = self._hooks
-            sub_agent._allowed_tools = self._allowed_tools
-            sub_agent._disallowed_tools = self._disallowed_tools
+            # 工具过滤：指定 tools 则限制子代理只能用这些工具
+            if tools:
+                tools_list = [t.strip() for t in tools.split(",") if t.strip()]
+                sub_agent.set_tool_filter(allowed=tools_list)
+            else:
+                sub_agent._allowed_tools = self._allowed_tools
+                sub_agent._disallowed_tools = self._disallowed_tools
             sub_agent._setup_tool_context()
             return sub_agent.run(task)
+
+        def spawn_subagents_handler(tasks_json: str) -> str:
+            import json as _json
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            try:
+                tasks = _json.loads(tasks_json)
+            except _json.JSONDecodeError as e:
+                return f"(x) tasks_json 解析失败: {e}"
+            if not isinstance(tasks, list) or not tasks:
+                return "(x) tasks_json 必须是非空 JSON 数组"
+            n = len(tasks)
+            results = [""] * n
+
+            def _run_one(idx):
+                td = tasks[idx]
+                t = td.get("task", "") if isinstance(td, dict) else str(td)
+                m = td.get("model", "") if isinstance(td, dict) else ""
+                tl = td.get("tools", "") if isinstance(td, dict) else ""
+                sk = td.get("skill", "") if isinstance(td, dict) else ""
+                try:
+                    r = spawn_subagent_handler(t, m, tl, sk)
+                except Exception as e:
+                    r = f"(x) 子代理执行失败: {e}"
+                return idx, r
+
+            with ThreadPoolExecutor(max_workers=min(n, 5)) as pool:
+                futures = [pool.submit(_run_one, i) for i in range(n)]
+                for f in as_completed(futures):
+                    idx, r = f.result()
+                    results[idx] = r
+
+            lines = []
+            for i, (td, r) in enumerate(zip(tasks, results)):
+                t = td.get("task", "") if isinstance(td, dict) else str(td)
+                lines.append(f"[子代理 {i+1}/{n}]")
+                lines.append(f"任务: {t}")
+                if isinstance(td, dict):
+                    if td.get("tools"):
+                        lines.append(f"工具限制: {td['tools']}")
+                    if td.get("skill"):
+                        lines.append(f"预载技能: {td['skill']}")
+                lines.append("---")
+                lines.append(r)
+                lines.append("")
+            return "\n".join(lines).strip()
 
         set_tool_context({
             "workDir": self.config.work_dir,
             "nonInteractive": self._non_interactive,
             "askUser": ask_user_handler,
             "spawnSubagent": spawn_subagent_handler,
+            "spawnSubagents": spawn_subagents_handler,
+            "skillManager": self.skill_mgr,
         })
 
     def set_non_interactive(self, v: bool):
@@ -1343,6 +1429,16 @@ class CortexAgent:
                 self.observer.record(trace, step_no, name, args, result, ok, cap_str, latency)
                 if self._term:
                     self._term.tool_done(ok, latency, result)
+                # ── 截图循环检测：文本模型无法识图，连续截图时注入警告 ──
+                if name in ("browser_screenshot", "computer_screenshot"):
+                    self._screenshot_streak += 1
+                    if self._screenshot_streak >= 3:
+                        result += (f"\n\n⚠️ [系统警告] 你已连续截图 {self._screenshot_streak} 次，"
+                                   "但文本模型无法识别图片内容。请立即切换到文本验证方式："
+                                   "browser_snapshot() 获取页面文本、check_server_status() 验证服务、"
+                                   "read_file/grep 检查代码。")
+                else:
+                    self._screenshot_streak = 0
                 # 写入时定长压缩（一次性；写入后字节不变 → 前缀缓存稳定）
                 self._ctx.append({"role": "tool", "tool_call_id": tc["id"],
                                   "content": self.governor.finalize_tool_result(result)})

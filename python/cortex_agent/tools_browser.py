@@ -16,8 +16,6 @@ _browser_ws_url = None
 # Browser Automation (Chrome CDP 直连)
 # ══════════════════════════════════════════════════════════════
 
-_browser_ws_url = None
-
 def _get_browser_ws() -> str:
     """获取或启动 Chrome/Edge 调试 WebSocket URL。
     如果没有检测到运行中的调试端口，自动启动 MS Edge。
@@ -147,10 +145,27 @@ def browser_navigate(work_dir: str, url: str) -> str:
         if nav_result.get("errorText"):
             return f"(x) 导航失败: {nav_result['errorText']}\nURL: {url}"
 
-        # 等待页面加载
-        _time.sleep(1.0)
+        # 等待页面加载：轮询 document.readyState 直到 complete
+        target_ws = target_page["webSocketDebuggerUrl"]
+        _time.sleep(0.5)  # 初始等待
+        load_ok = False
+        for i in range(12):  # 最多 12×0.5s = 6s
+            try:
+                state_raw = _cdp_ws_send(target_ws, json.dumps({
+                    "id": 2 + i,
+                    "method": "Runtime.evaluate",
+                    "params": {"expression": "document.readyState"},
+                }), timeout=3.0)
+                state = json.loads(state_raw).get("result", {}).get("result", {}).get("value")
+                if state == "complete":
+                    load_ok = True
+                    break
+            except Exception:
+                pass
+            _time.sleep(0.5)
+        _time.sleep(0.5)  # 额外等待 JS 渲染
 
-        # 4. 获取导航后的页面信息
+        # 获取导航后的页面信息
         title = "?"
         try:
             conn = http.client.HTTPConnection("127.0.0.1", 9222, timeout=5)
@@ -166,14 +181,15 @@ def browser_navigate(work_dir: str, url: str) -> str:
         except Exception:
             pass
 
-        return f"已在浏览器中导航到: {url}\n页面标题: {title}"
+        load_status = "✅ 页面已加载完成" if load_ok else "⚠️ 页面可能仍在加载（超时6s）"
+        return f"已在浏览器中导航到: {url}\n页面标题: {title}\n{load_status}"
     except Exception as e:
         return f"(x) 浏览器错误: {e}\n请确认浏览器已启动: start msedge --remote-debugging-port=9222 --user-data-dir=%TEMP%\\cortex-browser-profile"
 
 
 @registry.register(
-    "获取当前浏览器页面的文本快照（accessibility tree）。\n"
-    "用法: browser_snapshot()",
+    "获取当前浏览器页面的文本内容（通过 CDP 读取 document.body.innerText）。\n"
+    "用于验证页面内容，替代截图。文本模型可直接阅读。\n用法: browser_snapshot()",
     risk=RiskLevel.SAFE, capability=Capability.BROWSER)
 def browser_snapshot(work_dir: str) -> str:
     ws = _get_browser_ws()
@@ -189,14 +205,32 @@ def browser_snapshot(work_dir: str) -> str:
         conn.close()
         if not pages:
             return "(无打开的浏览器页面)"
-        # 返回页面摘要
-        lines = [f"({len(pages)} 个页面)\n"]
-        for p in pages:
-            t = p.get("title", "无标题")[:60]
-            u = p.get("url", "")[:80]
-            lines.append(f"  [{p.get('type','page')}] {t}")
-            lines.append(f"    {u}")
-        return "\n".join(lines)
+        # 找到第一个 type=page 的标签页
+        target_page = next((p for p in pages if p.get("type") == "page" and p.get("webSocketDebuggerUrl")), None)
+        if not target_page:
+            return "(无可用页面)"
+
+        # 通过 CDP 获取页面文本内容
+        text_raw = _cdp_ws_send(target_page["webSocketDebuggerUrl"], json.dumps({
+            "id": 1,
+            "method": "Runtime.evaluate",
+            "params": {
+                "expression": "document.body ? document.body.innerText : '(页面无 body 内容)'",
+                "returnByValue": True,
+            },
+        }), timeout=8.0)
+
+        text_data = json.loads(text_raw).get("result", {}).get("result", {})
+        text = text_data.get("value", "(无法获取页面内容)")
+        title = target_page.get("title", "?")
+        url = target_page.get("url", "?")
+
+        # 截断过长的页面文本
+        max_len = 8000
+        if len(text) > max_len:
+            text = text[:max_len] + f"\n\n[...页面文本已截断，共 {len(text)} 字符...]"
+
+        return f"页面标题: {title}\nURL: {url}\n\n=== 页面文本内容 ===\n{text}"
     except Exception as e:
         return f"(x) 浏览器错误: {e}"
 
@@ -313,6 +347,7 @@ def _cdp_ws_send(ws_url: str, payload: str, timeout: float = 8.0) -> str:
 # ── 修复 browser_screenshot 使用 WebSocket ──
 
 @registry.register(
+    "⚠️ 保存截图到文件，但文本模型无法识别图片内容。优先使用 browser_snapshot() 获取页面文本验证。\n"
     "截取浏览器页面截图保存到文件。\n"
     "用法: browser_screenshot(path=\"browser.png\")",
     risk=RiskLevel.WRITE, capability=Capability.BROWSER)

@@ -24,6 +24,7 @@ async function loadTools(): Promise<void> {
   await import("../tools/subagent.js");
   await import("../tools/git.js");
 await import("../tools/office.js");
+  await import("../tools/skills.js");
   console.error(`[cortex] ${registry.schemaList.length} tools loaded`);
 }
 
@@ -288,9 +289,9 @@ async function main(): Promise<void> {
                    anthropic: { api_key: "", base_url: "https://api.anthropic.com", models: { fable: "claude-fable-5", mythos: "claude-mythos-5", sonnet: "claude-sonnet-5", opus: "claude-opus-4-8", "opus-pro": "claude-opus-4-7", haiku: "claude-haiku-4-5" } } },
       web_search: { provider: "duckduckgo", brave_api_key: "", serpapi_api_key: "", tavily_api_key: "", max_results: 5, timeout: 10 },
       max_steps: 0, context_limit: 0, max_tokens: 0, max_input_tokens: 0, permission_mode: "standard",
-      compress_threshold: 1500, compress_head: 600, compress_tail: 400, safety_margin: 4096,
+      compress_threshold: 6000, compress_head: 2400, compress_tail: 1600, safety_margin: 4096,
       input_warn_pct: 80, input_force_pct: 90, compact_input_pct: 85, compact_keep_recent: 12,
-      max_result_chars: 2000, memory_inject_count: 30,
+      max_result_chars: 50000, memory_inject_count: 30,
       auto_extract_memory: true, memory_enabled: true, sessions_enabled: true,
     };
     fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
@@ -394,9 +395,9 @@ async function main(): Promise<void> {
       model: modelAlias, provider: prov,
       providers: { [prov]: { api_key: apiKey, base_url: baseUrls[prov], models: { [modelAlias]: modelName } } },
       max_steps: 0, context_limit: 0, max_tokens: 0, max_input_tokens: 0, permission_mode: "standard",
-      compress_threshold: 1500, compress_head: 600, compress_tail: 400, safety_margin: 4096,
+      compress_threshold: 6000, compress_head: 2400, compress_tail: 1600, safety_margin: 4096,
       input_warn_pct: 80, input_force_pct: 90, compact_input_pct: 85, compact_keep_recent: 12,
-      max_result_chars: 10000, memory_inject_count: 30,
+      max_result_chars: 50000, memory_inject_count: 30,
       auto_extract_memory: true, memory_enabled: true, sessions_enabled: true,
     };
     fs.mkdirSync(path.dirname(userPath), { recursive: true });

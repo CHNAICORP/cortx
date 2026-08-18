@@ -275,10 +275,26 @@ registry.register(
         return `(x) 导航失败: ${navResult.errorText}\nURL: ${url}`;
       }
 
-      // 等待页面加载
-      await new Promise(r => setTimeout(r, 1000));
+      // 等待页面加载：轮询 document.readyState 直到 complete
+      const targetWs = targetPage.webSocketDebuggerUrl;
+      let loadOk = false;
+      await new Promise(r => setTimeout(r, 500)); // 初始等待
+      for (let i = 0; i < 12; i++) { // 最多 12×500ms = 6s
+        try {
+          const stateRaw = await _cdpWsSend(targetWs, JSON.stringify({
+            id: 2 + i,
+            method: "Runtime.evaluate",
+            params: { expression: "document.readyState" },
+          }), 3000);
+          const state = JSON.parse(stateRaw)?.result?.result?.value;
+          if (state === "complete") { loadOk = true; break; }
+        } catch { /* ignore */ }
+        await new Promise(r => setTimeout(r, 500));
+      }
+      // 额外等待 JS 渲染稳定
+      await new Promise(r => setTimeout(r, 500));
 
-      // 4. 获取导航后的页面信息
+      // 获取导航后的页面信息
       let title = "?";
       try {
         const updatedPages = await _httpGet(9222, "/json");
@@ -288,7 +304,8 @@ registry.register(
         }
       } catch { /* ignore */ }
 
-      return `已在浏览器中导航到: ${url}\n页面标题: ${title}`;
+      const loadStatus = loadOk ? "✅ 页面已加载完成" : "⚠️ 页面可能仍在加载（超时6s）";
+      return `已在浏览器中导航到: ${url}\n页面标题: ${title}\n${loadStatus}`;
     } catch (e: any) {
       return `(x) 浏览器错误: ${e.message || e}\n请确认浏览器已启动: start msedge --remote-debugging-port=9222 --user-data-dir=%TEMP%\\cortex-browser-profile`;
     }
@@ -296,7 +313,8 @@ registry.register(
 );
 
 registry.register(
-  "获取当前浏览器页面的文本快照（页面列表摘要）。\n用法: browser_snapshot()",
+  "获取当前浏览器页面的文本内容（通过 CDP 读取 document.body.innerText）。\n"
+  + "用于验证页面内容，替代截图。文本模型可直接阅读。\n用法: browser_snapshot()",
   RiskLevel.SAFE, Capability.BROWSER,
   { workDir: "string" },
   async function browser_snapshot(): Promise<string> {
@@ -305,14 +323,31 @@ registry.register(
     try {
       const pages = await _httpGet(9222, "/json");
       if (!Array.isArray(pages) || !pages.length) return "(无打开的浏览器页面)";
-      const lines = [`(${pages.length} 个页面)\n`];
-      for (const p of pages) {
-        const t = (p.title || "无标题").slice(0, 60);
-        const u = (p.url || "").slice(0, 80);
-        lines.push(`  [${p.type || "page"}] ${t}`);
-        lines.push(`    ${u}`);
-      }
-      return lines.join("\n");
+      // 找到第一个 type=page 的标签页
+      const targetPage = pages.find((p: any) => p.type === "page" && p.webSocketDebuggerUrl);
+      if (!targetPage) return "(无可用页面)";
+
+      // 通过 CDP 获取页面文本内容
+      const textRaw = await _cdpWsSend(targetPage.webSocketDebuggerUrl, JSON.stringify({
+        id: 1,
+        method: "Runtime.evaluate",
+        params: {
+          expression: "document.body ? document.body.innerText : '(页面无 body 内容)'",
+          returnByValue: true,
+        },
+      }), 8000);
+
+      const text = JSON.parse(textRaw)?.result?.result?.value || "(无法获取页面内容)";
+      const title = targetPage.title || "?";
+      const url = targetPage.url || "?";
+
+      // 截断过长的页面文本
+      const maxLen = 8000;
+      const truncated = text.length > maxLen
+        ? text.slice(0, maxLen) + `\n\n[...页面文本已截断，共 ${text.length} 字符...]`
+        : text;
+
+      return `页面标题: ${title}\nURL: ${url}\n\n=== 页面文本内容 ===\n${truncated}`;
     } catch (e: any) {
       return `(x) 浏览器错误: ${e.message || e}`;
     }
@@ -320,7 +355,7 @@ registry.register(
 );
 
 registry.register(
-  "截取浏览器页面截图保存到文件。\n用法: browser_screenshot(path=\"browser.png\")",
+  "⚠️ 保存截图到文件，但文本模型无法识别图片内容。优先使用 browser_snapshot() 获取页面文本验证。\n截取浏览器页面截图保存到文件。\n用法: browser_screenshot(path=\"browser.png\")",
   RiskLevel.WRITE, Capability.BROWSER,
   { workDir: "string", outPath: "string" },
   async function browser_screenshot(workDir: string, args: Record<string, unknown>): Promise<string> {
@@ -350,7 +385,7 @@ registry.register(
   },
 );
 
-registry.register("桌面截图", RiskLevel.SYSTEM, Capability.BROWSER,
+registry.register("⚠️ 桌面截图保存到文件，文本模型无法识别图片内容。优先用 run_shell_command 或 read_file 等文本方式验证。\n桌面截图", RiskLevel.SYSTEM, Capability.BROWSER,
   { workDir: "string", outPath: "string" },
   function computer_screenshot(workDir: string, args: Record<string, unknown>): string {
     const p = String(args["outPath"] || "desktop_screenshot.png");
@@ -368,8 +403,9 @@ registry.register("桌面截图", RiskLevel.SYSTEM, Capability.BROWSER,
           `powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $s=[System.Windows.Forms.Screen]::PrimaryScreen; $b=New-Object System.Drawing.Bitmap $s.Bounds.Width,$s.Bounds.Height; $g=[System.Drawing.Graphics]::FromImage($b); $g.CopyFromScreen($s.Bounds.X,$s.Bounds.Y,0,0,$s.Bounds.Size); $b.Save('${d.replace(/'/g, "''")}'); $g.Dispose(); $b.Dispose()"`,
           { timeout: 15000 }
         );
+        return `桌面截图已保存: ${d}`;
       }
-      return `桌面截图已保存: ${d}`;
+      return `(x) computer_screenshot 仅支持 Windows`;
     } catch (e: any) { return `(x) 截图失败: ${e.message || e}`; }
   },
 );

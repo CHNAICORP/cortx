@@ -1,6 +1,6 @@
 {
   "name": "@chnaicorp/cortx",
-  "version": "2.6.0",
+  "version": "2.7.0",
   "type": "commonjs",
   "description": "AI Agent runtime — Harness Agent architecture + Agentic Loop engine",
   "homepage": "https://github.com/CHNAICORP/cortx#readme",
@@ -21,6 +21,13 @@
   "bin": {
     "ctx": "dist/cli/main.js"
   },
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "package.json",
+    "README.md",
+    "LICENSE"
+  ],
   "engines": {
     "node": ">=18"
   },

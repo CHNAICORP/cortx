@@ -14,6 +14,7 @@ from .cortex_agent import registry, RiskLevel, Capability
 # ══════════════════════════════════════════════════════════════
 
 @registry.register(
+    "⚠️ 桌面截图保存到文件，文本模型无法识别图片内容。优先用 run_shell_command 或 read_file 等文本方式验证。\n"
     "截取整个桌面屏幕截图保存到文件。\n"
     "用法: computer_screenshot(path=\"desktop.png\")",
     risk=RiskLevel.SYSTEM, capability=Capability.BROWSER)

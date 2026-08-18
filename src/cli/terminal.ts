@@ -94,6 +94,27 @@ export class Terminal {
     }
   }
 
+  // ── 子代理进度显示 ──
+
+  /** 子代理派遣开始 — 显示总数 */
+  subagentDispatch(count: number) {
+    const label = count === 1 ? "派遣子代理..." : `派遣 ${count} 个子代理...`;
+    this.write(`\n  ${Terminal.YELLOW}⚡ ${label}${Terminal.RESET}\n`);
+  }
+
+  /** 单个子代理开始执行 */
+  subagentStart(idx: number, total: number, task: string) {
+    const preview = task.length > 50 ? task.slice(0, 47) + "..." : task;
+    this.write(`  ${Terminal.GRAY}  └ [${idx}/${total}]${Terminal.RESET} ${Terminal.DIM}▶ ${preview}${Terminal.RESET}\n`);
+  }
+
+  /** 单个子代理完成 */
+  subagentDone(idx: number, total: number, success: boolean, latencyMs?: number) {
+    const icon = success ? `${Terminal.GREEN}✓${Terminal.RESET}` : `${Terminal.RED}✗${Terminal.RESET}`;
+    const time = latencyMs != null ? ` ${Terminal.GRAY}[${(latencyMs / 1000).toFixed(1)}s]${Terminal.RESET}` : "";
+    this.write(`  ${Terminal.GRAY}  └ [${idx}/${total}]${Terminal.RESET} ${icon}${time}\n`);
+  }
+
   /** Check if answer text has been displayed to the user */
   isAnswerShown(): boolean {
     return this.showingAnswer;

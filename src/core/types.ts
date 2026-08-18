@@ -195,14 +195,14 @@ export const DEFAULT_CONFIG: AgentConfig = {
   maxTokens: 0,
   maxInputTokens: 0,
   // ── ContextGovernor 可调参数 ──
-  compressThreshold: 1500,
-  compressHead: 600,
-  compressTail: 400,
+  compressThreshold: 6000,
+  compressHead: 2400,
+  compressTail: 1600,
   safetyMargin: 4096,
   inputWarnPct: 80,
   inputForcePct: 90,
   // ── ToolExecutor 可调参数 ──
-  maxResultChars: 10000,      // tool result truncation (supports large code files)
+  maxResultChars: 50000,      // tool result truncation (supports large code files)
   // ── Memory 注入控制 ──
   memoryInjectCount: 30,
 };

@@ -333,7 +333,7 @@ registry.register(
   function office_cli(_workDir: string, args: Record<string, unknown>): string {
     const command = String(args["command"]);
     // Resolve binary
-    const binary = oc.pipePaths ? 'officecli' : 'officecli'; // just use the name
+    const binary = 'officecli';
     const r = spawnSync(binary, command.split(/\s+/).filter(Boolean), {
       encoding: 'utf-8',
       shell: process.platform === 'win32',

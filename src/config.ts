@@ -112,9 +112,9 @@ export function loadSettings(): Settings {
       },
       max_steps: 0, context_limit: 0, max_tokens: 0, max_input_tokens: 0, permission_mode: "standard",
       max_rounds: 0, checkpoint_interval: 5, retry_max: 5, retry_base_delay: 2, compact_threshold: 60,
-      compress_threshold: 1500, compress_head: 600, compress_tail: 400, safety_margin: 4096,
+      compress_threshold: 6000, compress_head: 2400, compress_tail: 1600, safety_margin: 4096,
       input_warn_pct: 80, input_force_pct: 90, compact_input_pct: 85, compact_keep_recent: 12,
-      max_result_chars: 10000, memory_inject_count: 30,
+      max_result_chars: 50000, memory_inject_count: 30,
       auto_extract_memory: true, memory_enabled: true, sessions_enabled: true,
     };
     fs.mkdirSync(path.dirname(user), { recursive: true });

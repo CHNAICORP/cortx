@@ -32,7 +32,6 @@ settings.json 结构:
   "checkpoint_interval": 5,
   "retry_max": 3,
   "retry_base_delay": 2,
-  "compact_threshold": 60,
   "auto_extract_memory": true,
   "memory_enabled": true,
   "sessions_enabled": true
@@ -142,16 +141,16 @@ def load_settings(project_dir: str = None) -> dict:
             "max_tokens": 0,
             "max_input_tokens": 0,
             # ── ContextGovernor 可调参数 ──
-            "compress_threshold": 1500,
-            "compress_head": 600,
-            "compress_tail": 400,
+            "compress_threshold": 6000,
+            "compress_head": 2400,
+            "compress_tail": 1600,
             "safety_margin": 4096,
             "input_warn_pct": 80,
             "input_force_pct": 90,
             "compact_input_pct": 85,
             "compact_keep_recent": 12,
             # ── ToolExecutor 可调参数 ──
-            "max_result_chars": 10000,
+            "max_result_chars": 50000,
             # ── Memory 注入控制 ──
             "memory_inject_count": 30,
             "permission_mode": "standard",
@@ -206,7 +205,7 @@ def apply_to_config(config, settings: dict):
                 "safety_margin", "input_warn_pct", "input_force_pct",
                 "max_result_chars", "memory_inject_count",
                 "max_rounds", "checkpoint_interval", "retry_max",
-                "retry_base_delay", "compact_threshold",
+                "retry_base_delay",
                 "compact_input_pct", "compact_keep_recent"):
         if key in settings:
             setattr(config, key, settings[key])
@@ -256,7 +255,6 @@ def create_default_settings(path: str) -> dict:
         "checkpoint_interval": 5,
         "retry_max": 5,
         "retry_base_delay": 2,
-        "compact_threshold": 60,
         "auto_extract_memory": True,
         "memory_enabled": True,
         "sessions_enabled": True,
@@ -267,16 +265,16 @@ def create_default_settings(path: str) -> dict:
         "max_tokens": 0,
         "max_input_tokens": 0,
         # ── ContextGovernor 可调参数 (0=使用默认值) ──
-        "compress_threshold": 1500,
-        "compress_head": 600,
-        "compress_tail": 400,
+        "compress_threshold": 6000,
+        "compress_head": 2400,
+        "compress_tail": 1600,
         "safety_margin": 4096,
         "input_warn_pct": 80,
         "input_force_pct": 90,
         "compact_input_pct": 85,
         "compact_keep_recent": 12,
         # ── ToolExecutor 可调参数 ──
-        "max_result_chars": 10000,
+        "max_result_chars": 50000,
         # ── Memory 注入控制 ──
         "memory_inject_count": 30,
         "mcpServers": {
@@ -367,7 +365,6 @@ def create_default_settings(path: str) -> dict:
   "checkpoint_interval": 5,                  // 每 N 步保存一次断点
   "retry_max": 5,                             // 工具调用失败重试次数
   "retry_base_delay": 2,                      // 重试基础延迟（秒）
-  "compact_threshold": 60,                   // 上下文压缩阈值（token 数）
   "loop_timeout": 0,                          // 0=无超时（支持 24h 连续运行）
   "think_timeout": 600,                       // LLM 思考超时（秒）
   
@@ -386,9 +383,9 @@ def create_default_settings(path: str) -> dict:
   "context_limit": 0,                         // 0=自动计算（安全余量+safety_margin）
   "max_tokens": 0,                            // 0=使用模型默认值
   "max_input_tokens": 0,                      // 0=自动计算
-  "compress_threshold": 1500,                 // 消息数量阈值，超过则压缩
-  "compress_head": 600,                       // 压缩时保留的头部消息数
-  "compress_tail": 400,                       // 压缩时保留的尾部消息数
+  "compress_threshold": 6000,                 // 工具结果压缩阈值（字符数），超过则保留首尾
+  "compress_head": 2400,                      // 压缩时保留的头部字符数
+  "compress_tail": 1600,                      // 压缩时保留的尾部字符数
   "safety_margin": 4096,                      // 输入 Token 安全余量
   "input_warn_pct": 80,                       // 超过此百分比发出警告
   "input_force_pct": 90,                      // 超过此百分比强制压缩

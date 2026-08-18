@@ -1,19 +1,19 @@
 """
 Cortex Agent 工具实现 — 所有工具注册到 registry
 
-24 个 Harness Agent 内置工具:
-  文件操作: list_directory, read_file, write_file, edit_file, glob, file_ops, diff_files
+41 个 Harness Agent 内置工具:
+  文件操作: list_directory, read_file, write_file, edit_file, glob, file_ops, diff_files, read_json, csv_query
   搜索:     grep
-  数据库:   execute_sql_query, csv_query
-  执行:     run_shell_command, run_python
+  数据库:   execute_sql_query
+  执行:     run_shell_command, run_python, run_background_command, check_server_status, stop_background_process, list_background_processes
   网络:     web_search, web_fetch, http_request
-  配置:     read_json
   时间:     get_current_time
   记忆:     remember_fact, recall_fact, forget_fact
   任务:     task_create, task_list, task_update
-  辅助:     ask_user, python_lint
+  辅助:     ask_user, python_lint, list_tools
   Git:      git_status, git_diff, git_commit, git_branch, git_log
-  子代理:   spawn_subagent
+  子代理:   spawn_subagent, spawn_subagents
+  技能:     list_skills, use_skill, skill_install, skill_remove
 """
 
 import os, re, sys, sqlite3, platform, subprocess, datetime, json, csv, io, threading, time
@@ -311,7 +311,9 @@ def run_shell_command(work_dir: str, command: str) -> str:
                     f"   然后：check_server_status(url='http://localhost:5000')")
     
     is_win = platform.system() == "Windows"
-    args = ["powershell","-NoProfile","-NonInteractive","-Command",command] if is_win else ["bash", "-c", command]
+    # PowerShell 5.x 不支持 &&，自动转换为 ;
+    effective_cmd = command.replace("&&", ";") if is_win else command
+    args = ["powershell","-NoProfile","-NonInteractive","-Command",effective_cmd] if is_win else ["bash", "-c", command]
     
     retcode, stdout, stderr, timeout_reason = _run_with_inactivity_timeout(
         args, cwd=work_dir,
@@ -396,7 +398,7 @@ def run_background_command(work_dir: str, command: str) -> str:
     log_file = os.path.join(work_dir, f".bg_log_{int(time.time())}.txt")
 
     if is_win:
-        args = ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]
+        args = ["powershell", "-NoProfile", "-NonInteractive", "-Command", command.replace("&&", ";")]
     else:
         args = ["bash", "-c", command]
 
@@ -434,7 +436,7 @@ def run_background_command(work_dir: str, command: str) -> str:
     return (f"✅ 后台进程已启动 (PID={pid})\n"
             f"命令: {command}\n"
             f"日志: {log_file}\n"
-            f"提示: 使用 check_server_status 验证服务是否正常运行\n"
+            f"提示: 等待 2-3 秒后使用 check_server_status 验证（自动重试3次）\n"
             f"      使用 stop_background_process(pid={pid}) 停止进程")
 
 
@@ -442,44 +444,48 @@ def run_background_command(work_dir: str, command: str) -> str:
                    risk=RiskLevel.SAFE, capability=Capability.NET_HTTP)
 def check_server_status(work_dir: str, url: str, expected_status: int = 200,
                         timeout: int = 5, method: str = "GET") -> str:
-    """HTTP 健康检查。"""
-    import urllib.request as _ureq
+    """HTTP 健康检查。自动重试 3 次，间隔 1.5 秒。"""
+    import urllib.request as _ureq, urllib.error, time as _time
 
     # 安全检查：只允许 localhost/127.0.0.1
     if not re.search(r'https?://(localhost|127\.0\.0\.1|0\.0\.0\.0)', url):
         return f"(x) 安全限制：check_server_status 仅允许检查本地服务 (localhost/127.0.0.1)\nURL: {url}"
 
-    try:
-        req = _ureq.Request(url, method=method)
-        req.add_header("User-Agent", "CortexAgent/HealthCheck")
-        with _ureq.urlopen(req, timeout=timeout) as resp:
-            status = resp.status
-            body = resp.read(1000).decode("utf-8", errors="replace")
-            ok = (status == expected_status) if expected_status else (200 <= status < 400)
-            icon = "✅" if ok else "⚠"
-            return (f"{icon} 服务正常运行\n"
+    # 自动重试：服务器可能需要几秒才能就绪
+    max_retries = 3
+    retry_delay = 1.5
+    for attempt in range(1, max_retries + 1):
+        try:
+            req = _ureq.Request(url, method=method)
+            req.add_header("User-Agent", "CortexAgent/HealthCheck")
+            with _ureq.urlopen(req, timeout=timeout) as resp:
+                status = resp.status
+                body = resp.read(1000).decode("utf-8", errors="replace")
+                ok = (status == expected_status) if expected_status else (200 <= status < 400)
+                icon = "✅" if ok else "⚠"
+                retry_note = f" (第{attempt}次尝试成功)" if attempt > 1 else ""
+                return (f"{icon} 服务正常运行{retry_note}\n"
+                        f"URL: {url}\n"
+                        f"HTTP 状态码: {status} (期望: {expected_status})\n"
+                        f"响应体预览: {body[:200]}")
+        except urllib.error.HTTPError as e:
+            return (f"⚠ 服务返回错误\n"
                     f"URL: {url}\n"
-                    f"HTTP 状态码: {status} (期望: {expected_status})\n"
-                    f"响应体预览: {body[:200]}")
-    except urllib.error.HTTPError as e:
-        return (f"⚠ 服务返回错误\n"
-                f"URL: {url}\n"
-                f"HTTP 状态码: {e.code} (期望: {expected_status})\n"
-                f"错误: {e.reason}")
-    except urllib.error.URLError as e:
-        # 检查是否是连接被拒绝（服务未启动）
-        reason = str(e.reason)
-        if "Connection refused" in reason or "WinError 10061" in reason:
-            return (f"(x) 服务未启动或端口未监听\n"
+                    f"HTTP 状态码: {e.code} (期望: {expected_status})\n"
+                    f"错误: {e.reason}")
+        except (urllib.error.URLError, ConnectionError, OSError) as e:
+            if attempt < max_retries:
+                _time.sleep(retry_delay)
+                continue
+            reason = str(getattr(e, 'reason', e))
+            return (f"(x) 服务未启动或端口未监听（已重试 {max_retries} 次）\n"
                     f"URL: {url}\n"
                     f"可能的原因:\n"
                     f"  1. 服务器进程未成功启动\n"
                     f"  2. 服务器正在启动中，尚未就绪\n"
                     f"  3. 端口号错误\n"
-                    f"建议: 检查后台进程日志，或等待几秒后重试")
-        return f"(x) 连接失败: {reason}\nURL: {url}"
-    except Exception as e:
-        return f"(x) 检查失败: {e}"
+                    f"建议: 检查后台进程日志 (list_background_processes + read_file 查看日志)")
+    return f"(x) 检查失败（已重试 {max_retries} 次）\nURL: {url}"
 
 
 @registry.register("停止后台进程（通过 PID）",
@@ -1368,29 +1374,21 @@ def csv_query(work_dir: str, path: str, query: str = "SELECT * LIMIT 50") -> str
     "返回每个工具的名称、描述、风险等级和参数列表。",
     risk=RiskLevel.SAFE, capability=Capability.FS_READ)
 def list_tools(work_dir: str) -> str:
-    import json as _j
     schemas = registry.schemas
-    lines = [f"=== 已注册工具 ({len(schemas)} 个) ===\n"]
+    lines = [f"=== 已注册工具 ({len(schemas)} 个) ==="]
     for s in schemas:
         fn = s.get("function", {})
         name = fn.get("name", "?")
-        desc = fn.get("description", "").split("\n")[0][:100]
+        desc = fn.get("description", "").split("\n")[0][:70]
         params = fn.get("parameters", {}).get("properties", {})
         required = fn.get("parameters", {}).get("required", [])
         meta = registry.meta(name)
         risk_str = str(meta["risk"]).split(".")[-1] if meta else "?"
-        cap_str = meta["capability"].value if meta else "?"
-        param_parts = []
-        for pname, pinfo in params.items():
-            ptype = pinfo.get("type", "?")
-            req = "必填" if pname in required else "可选"
-            param_parts.append(f"{pname}({ptype},{req})")
-        params_str = ", ".join(param_parts) if param_parts else "无参数"
-        lines.append(f"  ● {name}")
-        lines.append(f"    描述: {desc}")
-        lines.append(f"    风险: {risk_str} | 能力: {cap_str}")
-        lines.append(f"    参数: {params_str}")
-        lines.append("")
+        param_names = [p for p in params if p not in ("work_dir", "workDir")]
+        params_str = ", ".join(
+            f"{p}*" if p in required else p for p in param_names
+        ) if param_names else "无参数"
+        lines.append(f"  • {name} — {desc} [{risk_str}] ({params_str})")
     return "\n".join(lines)
 
 
@@ -1523,13 +1521,300 @@ def git_log(work_dir: str, limit: int = 10) -> str:
 # ══════════════════════════════════════════════════════════════
 
 @registry.register(
-    "生成子代理执行独立任务。子代理拥有独立的上下文和工具集，执行完毕后返回结果。\n"
+    "生成子代理执行独立任务。子代理拥有独立的上下文和工具集，执行完毕后返回结果摘要。\n"
     "适用于将复杂任务分解为子任务，避免污染主对话上下文。\n"
-    "用法: spawn_subagent(task=\"搜索所有 API 端点并生成文档\")",
+    "参数:\n"
+    "  task   — 任务描述（必填）\n"
+    "  tools  — 限制子代理可用的工具，逗号分隔（如 'read_file,grep,glob'），留空则继承父代理\n"
+    "  skill  — 预加载技能名称（如 'code-review'），技能指引会注入子代理上下文\n"
+    "  model  — 模型别名覆盖（留空用父代理模型）\n"
+    "用法: spawn_subagent(task=\"审查 auth.py 的安全性\", tools=\"read_file,grep\", skill=\"code-review\")",
     risk=RiskLevel.SYSTEM, capability=Capability.SHELL)
-def spawn_subagent(work_dir: str, task: str, model: str = "") -> str:
+def spawn_subagent(work_dir: str, task: str, model: str = "",
+                   tools: str = "", skill: str = "") -> str:
     if not task.strip(): return "(x) 请提供任务描述"
-    return f"[子代理任务] {task}"
+    try:
+        from .tool_context import get_tool_context
+        ctx = get_tool_context()
+        handler = ctx.get("spawnSubagent")
+    except Exception:
+        handler = None
+    if not handler:
+        return "(x) 子代理系统不可用 — 请在 Agent 模式下使用"
+    try:
+        result = handler(task, model, tools, skill)
+        if not result.strip(): return "(子代理未返回结果)"
+        if len(result) > 5000:
+            head = result[:3500]
+            tail = result[-1500:]
+            result = f"{head}\n\n[...子代理结果已截断...]\n\n{tail}"
+        return result
+    except Exception as e:
+        return f"(x) 子代理执行失败: {e}"
+
+
+@registry.register(
+    "并行派遣多个子代理执行独立任务（fan-out 模式）。所有子代理同时运行，互不干扰。\n"
+    "适用于大规模代码分析、多维度审查（安全/性能/测试分别由不同子代理检查）等场景。\n\n"
+    "tasks_json 是一个 JSON 数组字符串，每个元素是一个任务对象:\n"
+    '  [{"task":"审查安全性","tools":"read_file,grep","skill":"code-review"},\n'
+    '   {"task":"检查测试覆盖率","tools":"read_file,grep,glob"},\n'
+    '   {"task":"审查代码风格","tools":"read_file"}]\n\n'
+    "每个任务对象支持: task(必填), tools(可选), skill(可选), model(可选)\n"
+    "用法: spawn_subagents(tasks_json='[{\"task\":\"分析模块A\"},{\"task\":\"分析模块B\"}]')",
+    risk=RiskLevel.SYSTEM, capability=Capability.SHELL)
+def spawn_subagents(work_dir: str, tasks_json: str) -> str:
+    if not tasks_json.strip():
+        return "(x) 请提供 tasks_json 参数（JSON 数组）"
+    try:
+        from .tool_context import get_tool_context
+        ctx = get_tool_context()
+        handler = ctx.get("spawnSubagents")
+    except Exception:
+        handler = None
+    if not handler:
+        return "(x) 并行子代理系统不可用 — 请在 Agent 模式下使用"
+    try:
+        return handler(tasks_json)
+    except Exception as e:
+        return f"(x) 并行子代理执行失败: {e}"
+
+
+# ══════════════════════════════════════════════════════════════
+# 技能工具 (与 TS skills.ts 对齐)
+# ══════════════════════════════════════════════════════════════
+
+@registry.register(
+    "列出所有可用的技能（Skills）。技能是可复用的专家级指引模板，能为特定任务提供专业方法论\n"
+    "（如代码审查、PPT 制作、Office 文档处理、安全审计等）。无需参数。\n"
+    "用法: list_skills()",
+    risk=RiskLevel.SAFE, capability=Capability.FS_READ)
+def list_skills(work_dir: str) -> str:
+    try:
+        from .tool_context import get_tool_context
+        mgr = get_tool_context().get("skillManager")
+    except Exception:
+        mgr = None
+    if not mgr:
+        return "(x) 技能系统不可用"
+    cats = mgr.list_by_category()
+    total = len(mgr.skills)
+    if total == 0:
+        return "(没有可用技能)"
+    lines = [f"可用技能 ({total} 个):\n"]
+    for cat in sorted(cats):
+        lines.append(f"  [{cat}]")
+        for s in cats[cat]:
+            desc = s.description or "(无描述)"
+            lines.append(f"    • {s.name} — {desc}")
+        lines.append("")
+    lines.append("用 use_skill(name=\"技能名\") 加载某技能的完整指引。")
+    return "\n".join(lines)
+
+
+@registry.register(
+    "加载指定技能的完整内容（专家指引/prompt）到上下文。先用 list_skills 查看可用技能名。\n"
+    "加载后请按技能指引执行用户任务。\n"
+    "用法: use_skill(name=\"code-review\")",
+    risk=RiskLevel.SAFE, capability=Capability.FS_READ)
+def use_skill(work_dir: str, name: str) -> str:
+    if not name or not name.strip():
+        return "(x) 请提供技能名称。用 list_skills() 查看可用技能。"
+    try:
+        from .tool_context import get_tool_context
+        mgr = get_tool_context().get("skillManager")
+    except Exception:
+        mgr = None
+    if not mgr:
+        return "(x) 技能系统不可用"
+    skill = mgr.get(name.strip())
+    if not skill:
+        available = ", ".join(sorted(mgr.skills.keys()))
+        return f"(x) 技能不存在: {name}\n可用技能: {available}"
+    return skill.to_prompt()
+
+
+@registry.register(
+    "从 GitHub 仓库或 URL 安装技能（SKILL.md）。安装后自动注册到技能系统，立即可用。\n"
+    "参数:\n"
+    '  source — 技能来源，支持: GitHub 简写("owner/repo")、GitHub URL、raw URL、直接 .md URL\n'
+    '  name   — 技能名称覆盖（可选，默认从来源推断）\n'
+    "用法:\n"
+    '  skill_install(source="alchaincyf/huashu-design")\n'
+    '  skill_install(source="https://github.com/pengpengliu1212-art/humanize-write")',
+    risk=RiskLevel.WRITE, capability=Capability.FS_WRITE)
+def skill_install(work_dir: str, source: str, name: str = "") -> str:
+    import urllib.request, hashlib, json as _json, shutil
+    source = (source or "").strip()
+    if not source:
+        return "(x) 请提供 skill 来源（GitHub owner/repo 或 URL）"
+
+    # 解析来源
+    urls = []
+    source_type = "unknown"
+    if source.startswith(("http://", "https://")):
+        if "raw.githubusercontent.com" in source:
+            parts = source.split("/")
+            default_name = parts[4] if len(parts) > 4 else "skill"
+            urls = [source]
+            source_type = "github"
+        elif "github.com/" in source:
+            import re
+            m = re.match(r"https?://github\.com/([^/]+/[^/]+)", source)
+            if m:
+                repo = m.group(1).replace(".git", "").rstrip("/")
+                default_name = repo.split("/")[1]
+                urls = [
+                    f"https://raw.githubusercontent.com/{repo}/main/SKILL.md",
+                    f"https://raw.githubusercontent.com/{repo}/master/SKILL.md",
+                ]
+                source_type = "github"
+            else:
+                default_name = "custom-skill"
+                urls = [source]
+        else:
+            default_name = source.split("/")[-1].replace(".md", "") or "custom-skill"
+            urls = [source]
+            source_type = "url"
+    elif "/" in source and not source.startswith("."):
+        default_name = source.split("/")[1]
+        urls = [
+            f"https://raw.githubusercontent.com/{source}/main/SKILL.md",
+            f"https://raw.githubusercontent.com/{source}/master/SKILL.md",
+        ]
+        source_type = "github"
+    else:
+        default_name = source
+
+    skill_name = name.strip() or default_name
+    if not urls:
+        return f"(x) 无法解析来源: {source}"
+
+    # 下载
+    content = ""
+    last_err = ""
+    for url in urls:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "cortex-agent/skill-install"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                content = resp.read().decode("utf-8")
+            if content and len(content) > 10 and "404: Not Found" not in content:
+                break
+            last_err = f"内容无效或 404: {url}"
+        except Exception as e:
+            last_err = str(e)
+    if not content or len(content) < 10:
+        return f"(x) 下载失败: {last_err}\n请检查来源是否正确: {source}"
+
+    # 保存
+    skill_dir = os.path.join(work_dir, ".cortx", "skills", skill_name)
+    skill_path = os.path.join(skill_dir, "SKILL.md")
+    try:
+        os.makedirs(skill_dir, exist_ok=True)
+        with open(skill_path, "w", encoding="utf-8") as f:
+            f.write(content)
+    except Exception as e:
+        return f"(x) 写入文件失败: {e}"
+
+    # hash
+    computed_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    # 更新 skills-lock.json
+    try:
+        lock_path = os.path.join(work_dir, "skills-lock.json")
+        lock = {"version": 1, "skills": {}}
+        if os.path.exists(lock_path):
+            try:
+                with open(lock_path, "r", encoding="utf-8") as f:
+                    lock = _json.load(f)
+            except Exception:
+                pass
+        lock.setdefault("skills", {})[skill_name] = {
+            "source": source, "sourceType": source_type,
+            "skillPath": "SKILL.md", "computedHash": computed_hash,
+        }
+        with open(lock_path, "w", encoding="utf-8") as f:
+            _json.dump(lock, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+    # 重新加载
+    try:
+        from .tool_context import get_tool_context
+        mgr = get_tool_context().get("skillManager")
+        if mgr:
+            mgr.reload()
+    except Exception:
+        pass
+
+    # 提取 description
+    import re as _re
+    desc_match = _re.search(r'^description:\s*"?(.+?)"?\s*$', content, _re.MULTILINE)
+    desc = desc_match.group(1) if desc_match else "(从文件内容推断)"
+
+    return (f"✅ 技能安装成功!\n"
+            f"  名称: {skill_name}\n"
+            f"  描述: {desc}\n"
+            f"  来源: {source}\n"
+            f"  路径: {skill_path}\n\n"
+            f'用 use_skill(name="{skill_name}") 加载该技能，或 list_skills() 查看所有技能。')
+
+
+@registry.register(
+    "删除已安装的技能。从磁盘移除 SKILL.md 并更新 skills-lock.json。\n"
+    '用法: skill_remove(name="humanize-write")',
+    risk=RiskLevel.WRITE, capability=Capability.FS_WRITE)
+def skill_remove(work_dir: str, name: str) -> str:
+    import shutil
+    name = (name or "").strip()
+    if not name:
+        return "(x) 请提供要删除的技能名称"
+    if name in ("code-review", "refactor", "test-writer", "doc-writer", "debug", "explain", "architect"):
+        return f'(x) "{name}" 是内置技能，无法删除'
+
+    skill_dir = os.path.join(work_dir, ".cortx", "skills", name)
+    skill_file = os.path.join(work_dir, ".cortx", "skills", name + ".md")
+    removed = False
+
+    if os.path.isdir(skill_dir):
+        try:
+            shutil.rmtree(skill_dir)
+            removed = True
+        except Exception as e:
+            return f"(x) 删除失败: {e}"
+    elif os.path.isfile(skill_file):
+        try:
+            os.remove(skill_file)
+            removed = True
+        except Exception as e:
+            return f"(x) 删除失败: {e}"
+    if not removed:
+        return f"(x) 技能不存在: {name}"
+
+    # 更新 skills-lock.json
+    try:
+        import json as _json
+        lock_path = os.path.join(work_dir, "skills-lock.json")
+        if os.path.exists(lock_path):
+            with open(lock_path, "r", encoding="utf-8") as f:
+                lock = _json.load(f)
+            if lock.get("skills", {}).get(name):
+                del lock["skills"][name]
+                with open(lock_path, "w", encoding="utf-8") as f:
+                    _json.dump(lock, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+    # 重新加载
+    try:
+        from .tool_context import get_tool_context
+        mgr = get_tool_context().get("skillManager")
+        if mgr:
+            mgr.reload()
+    except Exception:
+        pass
+
+    return f"✅ 技能已删除: {name}"
 
 
 # ══════════════════════════════════════════════════════════════
