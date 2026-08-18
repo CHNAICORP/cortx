@@ -19,7 +19,7 @@ Cortex Agent 工具实现 — 所有工具注册到 registry
 import os, re, sys, sqlite3, platform, subprocess, datetime, json, csv, io, threading, time
 import urllib.parse, urllib.request, urllib.error
 from .cortex_agent import registry, RiskLevel, Capability, check_ssrf
-from .constants import truncate_middle, USER_AGENT, USER_AGENT_SHORT, PRODUCT_NAME
+from .constants import truncate_middle, USER_AGENT, USER_AGENT_SHORT, PRODUCT_NAME, needs_proxy, get_proxy_url
 
 _tasks = []  # 模块级简单任务存储
 
@@ -571,15 +571,24 @@ def get_current_time(work_dir: str) -> str:
 # 网络 — 代理感知的 opener（自动读取环境变量 HTTPS_PROXY/HTTP_PROXY）
 # ══════════════════════════════════════════════════════════════
 
-def _build_opener():
-    """构建带代理支持的 urllib opener。自动从环境变量读取代理配置。"""
+def _build_opener(url: str = None):
+    """构建 urllib opener。传入 url 时智能判断：海外域名走代理，国内域名直连。"""
     handlers = []
-    for proto_key, proxy_key in [("https", "HTTPS_PROXY"), ("https", "https_proxy"),
-                                   ("http", "HTTP_PROXY"), ("http", "http_proxy")]:
-        proxy_url = os.environ.get(proxy_key, "")
+    # 智能代理：海外域名走代理（加速防超时），国内域名直连
+    use_proxy = False
+    if url and needs_proxy(url):
+        proxy_url = get_proxy_url()
         if proxy_url:
-            handlers.append(urllib.request.ProxyHandler({proto_key: proxy_url}))
-            break  # 一个代理通常覆盖两种协议
+            handlers.append(urllib.request.ProxyHandler({"https": proxy_url, "http": proxy_url}))
+            use_proxy = True
+    if not use_proxy:
+        # 无 URL 或不需要代理时，从环境变量读取（兼容旧行为）
+        for proto_key, proxy_key in [("https", "HTTPS_PROXY"), ("https", "https_proxy"),
+                                       ("http", "HTTP_PROXY"), ("http", "http_proxy")]:
+            proxy_url = os.environ.get(proxy_key, "")
+            if proxy_url and (url is None):
+                handlers.append(urllib.request.ProxyHandler({proto_key: proxy_url}))
+                break
     return urllib.request.build_opener(*handlers) if handlers else urllib.request.build_opener()
 
 
@@ -681,7 +690,7 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
     provider = cfg.get("provider", "duckduckgo")
     n = int(max_results) if max_results and int(max_results) > 0 else int(cfg.get("max_results", 15))
     timeout = int(cfg.get("timeout", 10))
-    opener = _build_opener()
+    opener = _build_opener("https://cn.bing.com")  # 国内域名，不需要代理
     encoded = urllib.parse.quote(query)
 
     allowed = [d.strip() for d in allowed_domains.split(",") if d.strip()] if allowed_domains else None
@@ -924,7 +933,7 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
             req = urllib.request.Request(r["url"], headers={
                 "User-Agent": USER_AGENT_SHORT
             })
-            with _build_opener().open(req, timeout=3) as resp:
+            with _build_opener(r["url"]).open(req, timeout=3) as resp:
                 html = resp.read(102400).decode("utf-8", errors="ignore")
             text = re.sub(r'<script[\s\S]*?</script>', '', html, flags=re.I)
             text = re.sub(r'<style[\s\S]*?</style>', '', text, flags=re.I)
@@ -1067,7 +1076,7 @@ def web_fetch(work_dir: str, url: str, max_chars: int = 0) -> str:
                 "User-Agent": PRODUCT_NAME,
                 "Accept": "text/plain",
             })
-            opener = _build_opener()
+            opener = _build_opener(url)
             with opener.open(jina_req, timeout=8) as r:
                 if r.status == 200:
                     jina_text = r.read(204800).decode("utf-8", errors="ignore").strip()
@@ -1091,7 +1100,7 @@ def web_fetch(work_dir: str, url: str, max_chars: int = 0) -> str:
             "User-Agent": PRODUCT_NAME,
             "Accept": "text/plain",
         })
-        opener = _build_opener()
+        opener = _build_opener(url)
         with opener.open(jina_req, timeout=8) as r:
             if r.status == 200:
                 jina_text = r.read(204800).decode("utf-8", errors="ignore").strip()
@@ -1108,7 +1117,7 @@ def web_fetch(work_dir: str, url: str, max_chars: int = 0) -> str:
         pass  # Jina 失败，回退到原始 HTTP
 
     # ── 策略 2: 原始 HTTP + HTML 解析（回退）──
-    opener = _build_opener()
+    opener = _build_opener(url)
     try:
         req = urllib.request.Request(url, headers={
             "User-Agent": USER_AGENT,
@@ -1349,7 +1358,7 @@ def http_request(work_dir: str, url: str, method: str = "GET", body: str = "",
                     hdrs[k.strip()] = v.strip()
         data = body.encode() if body else None
         req = urllib.request.Request(url, data=data, headers=hdrs, method=method.upper())
-        opener = _build_opener()
+        opener = _build_opener(url)
         with opener.open(req, timeout=10) as r:  # 代理感知
             text = r.read().decode("utf-8", errors="ignore")[:5000]
             return f"HTTP {r.status}\n{text}"

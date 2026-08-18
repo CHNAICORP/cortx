@@ -15,7 +15,7 @@
 import { registry } from '../core/registry.js';
 import { RiskLevel, Capability } from '../core/types.js';
 import { checkSsrf } from '../core/policy.js';
-import { truncateMiddle, USER_AGENT, USER_AGENT_SHORT, PRODUCT_NAME } from '../core/constants.js';
+import { truncateMiddle, USER_AGENT, USER_AGENT_SHORT, PRODUCT_NAME, needsProxy, getProxyUrl } from '../core/constants.js';
 import * as https from "node:https";
 import * as http from "node:http";
 
@@ -27,7 +27,8 @@ async function httpRequest(url: string, method = 'GET', body?: string, timeout =
     throw new Error(ssrfMsg);
   }
   return new Promise((resolve, reject) => {
-    const proxy = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy;
+    // 智能代理：海外域名走代理（加速防超时），国内域名直连
+    const proxy = needsProxy(url) ? getProxyUrl() : null;
     let hostname = reqUrl.hostname;
     let port = reqUrl.port || (reqUrl.protocol === 'https:' ? 443 : 80);
     let path = reqUrl.pathname + reqUrl.search;
@@ -347,16 +348,11 @@ registry.register(
         + `3. 检查网络连接是否正常)`;
     }
 
-    // ── 内容增强: 并行抓取前 2 条结果的页面内容（参考 Continue.dev 做法）──
+    // ── 内容增强: 并行抓取前 3 条结果的页面内容（httpRequest 支持智能代理）──
     const enrichTopN = Math.min(3, filtered.length);
     await Promise.allSettled(filtered.slice(0, enrichTopN).map(async (r) => {
       try {
-        const resp = await fetch(r.url, {
-          signal: AbortSignal.timeout(3000),
-          headers: { "User-Agent": USER_AGENT_SHORT },
-        });
-        if (!resp.ok) return;
-        const html = await resp.text();
+        const html = await httpRequest(r.url, 'GET', undefined, 3000);
         let text = htmlToReadable(html);
         if (text.length > 100) {
           r.snippet = text.slice(0, 2000);

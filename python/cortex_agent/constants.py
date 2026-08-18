@@ -34,7 +34,7 @@ USER_AGENT_SHORT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 PRODUCT_NAME = "cortex-agent"
 
 # ── MCP 客户端版本（统一，消除 "1.0" vs "2.7.0" 不一致）──
-MCP_CLIENT_VERSION = "2.9.11"
+MCP_CLIENT_VERSION = "2.9.12"
 MCP_CLIENT_INFO = {"name": PRODUCT_NAME, "version": MCP_CLIENT_VERSION}
 
 # ── ANSI 终端色板 ──
@@ -111,3 +111,33 @@ def walk_dir(dir_path: str, cb, max_results: int = 5000) -> int:
 
     _walk(dir_path)
     return count
+
+
+# ── 海外域名列表（直连可能超时，需要走代理）──
+OVERSEAS_DOMAINS = [
+    "github.com", "raw.githubusercontent.com", "huggingface.co",
+    "stackoverflow.com", "pypi.org", "npmjs.com", "docs.python.org",
+    "docs.djangoproject.com", "fastapi.tiangolo.com", "openai.com",
+    "anthropic.com", "google.com", "techcrunch.com", "medium.com",
+    "dev.to", "reddit.com", "arxiv.org", "readthedocs.io",
+    "developer.mozilla.org", "w3.org", "runwayml.com", "pika.art",
+    "lumalabs.ai", "expressjs.com", "react.dev", "vuejs.org",
+    "nodejs.org", "go.dev", "rust-lang.org",
+]
+
+
+def needs_proxy(url: str) -> bool:
+    """判断 URL 是否需要走代理（海外域名直连可能超时）"""
+    from urllib.parse import urlparse
+    try:
+        host = (urlparse(url).hostname or "").lower()
+        return any(host == d or host.endswith("." + d) for d in OVERSEAS_DOMAINS)
+    except Exception:
+        return False
+
+
+def get_proxy_url() -> str | None:
+    """获取代理地址（从环境变量读取）"""
+    import os
+    return os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") \
+        or os.environ.get("https_proxy") or os.environ.get("http_proxy")

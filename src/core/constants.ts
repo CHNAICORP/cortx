@@ -22,7 +22,7 @@ export const USER_AGENT_SHORT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Apple
 export const PRODUCT_NAME = "cortex-agent";
 
 // ── MCP 客户端版本（统一，消除 "1.0" vs "2.7.0" 不一致）──
-export const MCP_CLIENT_VERSION = "2.9.11";
+export const MCP_CLIENT_VERSION = "2.9.12";
 export const MCP_CLIENT_INFO = { name: PRODUCT_NAME, version: MCP_CLIENT_VERSION };
 
 // ── ANSI 终端色板 ──
@@ -106,4 +106,30 @@ export function walkDir(
   };
   walk(dir);
   return count;
+}
+
+// ── 海外域名列表（直连可能超时，需要走代理）──
+export const OVERSEAS_DOMAINS = [
+  "github.com", "raw.githubusercontent.com", "huggingface.co",
+  "stackoverflow.com", "pypi.org", "npmjs.com", "docs.python.org",
+  "docs.djangoproject.com", "fastapi.tiangolo.com", "openai.com",
+  "anthropic.com", "google.com", "techcrunch.com", "medium.com",
+  "dev.to", "reddit.com", "arxiv.org", "readthedocs.io",
+  "developer.mozilla.org", "w3.org", "runwayml.com", "pika.art",
+  "lumalabs.ai", "expressjs.com", "react.dev", "vuejs.org",
+  "nodejs.org", "go.dev", "rust-lang.org",
+];
+
+/** 判断 URL 是否需要走代理（海外域名直连可能超时） */
+export function needsProxy(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return OVERSEAS_DOMAINS.some(d => host === d || host.endsWith("." + d));
+  } catch { return false; }
+}
+
+/** 获取代理地址（从环境变量读取） */
+export function getProxyUrl(): string | null {
+  return process.env.HTTPS_PROXY || process.env.HTTP_PROXY
+    || process.env.https_proxy || process.env.http_proxy || null;
 }
