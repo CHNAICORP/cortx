@@ -538,6 +538,8 @@ export class CortexAgent {
   private _nonInteractive: boolean = false;
   private _allowedTools: Set<string> | null = null;
   private _disallowedTools: Set<string> | null = null;
+  /** Agent 深度：0=主代理, 1=子代理。子代理的工具 schema 中不包含 spawn_subagent/spawn_subagents */
+  private _depth: number = 0;
   private term: {
     thinkToken: (t: string) => void;
     answerToken: (t: string) => void;
@@ -556,8 +558,9 @@ export class CortexAgent {
 
   setTerm(t: typeof this.term) { this.term = t; }
 
-  constructor(config: Partial<AgentConfig> = {}) {
+  constructor(config: Partial<AgentConfig> = {}, depth: number = 0) {
     this.config = { ...DEFAULT_CONFIG, ...config };
+    this._depth = depth;
     let wd = path.resolve(this.config.workDir);
     try {
       fs.mkdirSync(wd, { recursive: true });
@@ -585,11 +588,17 @@ this._skillMgr = new SkillManager(this.config.workDir);
     if (this.config.contextLimit === 0) this.config.contextLimit = caps.contextWindow;
     if (this.config.maxTokens === 0) this.config.maxTokens = caps.maxOutputTokens;
 
+    // 根据 depth 过滤工具 schema：子代理（depth>0）看不到 spawn_subagent/spawn_subagents
+    // 这是架构层面的隔离 — LLM 根本不知道这些工具存在，不会尝试调用
+    const toolSchemas = depth > 0
+      ? registry.schemaList.filter(s => s.function.name !== "spawn_subagent" && s.function.name !== "spawn_subagents")
+      : registry.schemaList;
+
     this.llm = new LLMProvider({
       apiKey: this.config.apiKey,
       baseUrl: this.config.baseUrl,
       model: resolvedModel,
-      tools: registry.schemaList,
+      tools: toolSchemas,
       timeout: this.config.thinkTimeout,
       maxTokens: this.config.maxTokens,
     });
@@ -615,14 +624,12 @@ this._skillMgr = new SkillManager(this.config.workDir);
       maxRounds: 1,
       thinkTimeout: Math.max(this.config.thinkTimeout || 600, 180), // 子代理并行时API响应慢，至少180s
     };
-    const subAgent = new CortexAgent(subConfig);
+    const subAgent = new CortexAgent(subConfig, this._depth + 1);
     subAgent._nonInteractive = true;
     subAgent._hooks = this._hooks;
-    // 子代理禁止再派遣子代理（代码层面强制，避免嵌套导致 API 费用爆炸）
-    const SUBAGENT_BLOCKED = new Set(["spawn_subagent", "spawn_subagents"]);
-
+    // 工具 schema 已在构造函数中按 depth 过滤（子代理看不到 spawn_subagent/spawn_subagents）
+    // 这里只处理用户指定的 tools 白名单/黑名单
     if (tools) {
-      // 用户指定了 tools 参数：使用白名单，但添加常用工具确保子代理不会因缺少工具而受阻
       const toolsList = tools.split(",").map(t => t.trim()).filter(Boolean);
       const COMMON = [
         "list_tools", "get_current_time",
@@ -638,15 +645,10 @@ this._skillMgr = new SkillManager(this.config.workDir);
         "mcp_list_servers", "mcp_registry",
       ];
       for (const e of COMMON) { if (!toolsList.includes(e)) toolsList.push(e); }
-      // 从白名单中移除被禁止的工具
-      const filtered = toolsList.filter(t => !SUBAGENT_BLOCKED.has(t));
-      subAgent.setToolFilter(filtered, [...SUBAGENT_BLOCKED]);
+      subAgent.setToolFilter(toolsList, null);
     } else {
-      // 未指定 tools：放行所有工具，但禁止子代理派遣
       subAgent._allowedTools = null;
-      const blocked = new Set(SUBAGENT_BLOCKED);
-      if (this._disallowedTools) for (const t of this._disallowedTools) blocked.add(t);
-      subAgent._disallowedTools = blocked;
+      subAgent._disallowedTools = this._disallowedTools;
     }
     // 设置子代理终端（内联流式显示）
     let subTerm: SubagentTerminal | null = null;
@@ -1350,8 +1352,15 @@ this._skillMgr = new SkillManager(this.config.workDir);
         }
         this._lastToolSig = toolSig;
 
+        // ── 架构安全网：子代理（depth>0）不能派遣子代理 ──
+        // 正常情况下子代理的工具 schema 中不包含这些工具，LLM 不会调用。
+        // 这里是最后的安全网，防止任何边界情况。
+        if (this._depth > 0 && (tc.name === "spawn_subagent" || tc.name === "spawn_subagents")) {
+          ok = false;
+          reason = `(x) 架构限制：子代理（深度 ${this._depth}）不能派遣子代理。请自己完成任务。`;
+        }
         // ── 工具白名单/黑名单过滤 ──
-        if (this._allowedTools && !this._allowedTools.has(tc.name)) {
+        else if (this._allowedTools && !this._allowedTools.has(tc.name)) {
           ok = false; reason = `工具 ${tc.name} 不在白名单中`;
         } else if (this._disallowedTools && this._disallowedTools.has(tc.name)) {
           ok = false; reason = `工具 ${tc.name} 已被黑名单禁止`;

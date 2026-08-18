@@ -656,8 +656,9 @@ class AgentConfig:
 class CortexAgent:
     """Agentic Loop: Think(stream) → Guard → Act → Reflect"""
 
-    def __init__(self, config: AgentConfig = None):
+    def __init__(self, config: AgentConfig = None, depth: int = 0):
         self.config = config or AgentConfig()
+        self._depth = depth  # 0=主代理, 1=子代理
         wd = os.path.realpath(self.config.work_dir)
         try:
             os.makedirs(wd, exist_ok=True)
@@ -708,8 +709,15 @@ class CortexAgent:
             self.config.context_limit = caps["context_window"]
         if self.config.max_tokens == 0:
             self.config.max_tokens = caps["max_output_tokens"]
+        # 根据 depth 过滤工具 schema：子代理（depth>0）看不到 spawn_subagent/spawn_subagents
+        # 这是架构层面的隔离 — LLM 根本不知道这些工具存在，不会尝试调用
+        if depth > 0:
+            tool_schemas = [s for s in registry.schemas
+                           if s["function"]["name"] not in ("spawn_subagent", "spawn_subagents")]
+        else:
+            tool_schemas = registry.schemas
         self.llm = LLMProvider(self.config.api_key,
-                               resolved_model, registry.schemas,
+                               resolved_model, tool_schemas,
                                timeout=self.config.think_timeout,
                                max_tokens=self.config.max_tokens)
         self._ctx: List[Dict] = []; self._trace = None
@@ -1119,14 +1127,12 @@ class CortexAgent:
                 max_steps=0,
                 max_rounds=1,
             )
-            sub_agent = CortexAgent(sub_config)
+            sub_agent = CortexAgent(sub_config, self._depth + 1)
             sub_agent._non_interactive = True
             sub_agent._hooks = self._hooks
-            # 子代理禁止再派遣子代理（代码层面强制，避免嵌套导致 API 费用爆炸）
-            _SUBAGENT_BLOCKED = {"spawn_subagent", "spawn_subagents"}
-
+            # 工具 schema 已在构造函数中按 depth 过滤（子代理看不到 spawn_subagent/spawn_subagents）
+            # 这里只处理用户指定的 tools 白名单
             if tools:
-                # 用户指定了 tools 参数：使用白名单，但添加常用工具确保子代理不会因缺少工具而受阻
                 tools_list = [t.strip() for t in tools.split(",") if t.strip()]
                 _COMMON = [
                     "list_tools", "get_current_time",
@@ -1144,16 +1150,10 @@ class CortexAgent:
                 for e in _COMMON:
                     if e not in tools_list:
                         tools_list.append(e)
-                # 从白名单中移除被禁止的工具
-                tools_list = [t for t in tools_list if t not in _SUBAGENT_BLOCKED]
-                sub_agent.set_tool_filter(allowed=tools_list, disallowed=list(_SUBAGENT_BLOCKED))
+                sub_agent.set_tool_filter(allowed=tools_list)
             else:
-                # 未指定 tools：放行所有工具，但禁止子代理派遣
                 sub_agent._allowed_tools = None
-                blocked = set(_SUBAGENT_BLOCKED)
-                if self._disallowed_tools:
-                    blocked.update(self._disallowed_tools)
-                sub_agent._disallowed_tools = blocked
+                sub_agent._disallowed_tools = self._disallowed_tools
             sub_agent._setup_tool_context()
             import time as _st
             _t0 = _st.time()
@@ -1379,8 +1379,13 @@ class CortexAgent:
                 else:
                     self._repeat_count = 0
                 self._last_tool_sig = tool_sig
+                # ── 架构安全网：子代理（depth>0）不能派遣子代理 ──
+                # 正常情况下子代理的工具 schema 中不包含这些工具，LLM 不会调用。
+                # 这里是最后的安全网，防止任何边界情况。
+                if self._depth > 0 and name in ("spawn_subagent", "spawn_subagents"):
+                    ok, reason = False, f"(x) 架构限制：子代理（深度 {self._depth}）不能派遣子代理。请自己完成任务。"
                 # ── 工具白名单/黑名单过滤 ──
-                if self._allowed_tools and name not in self._allowed_tools:
+                elif self._allowed_tools and name not in self._allowed_tools:
                     ok, reason = False, f"工具 {name} 不在白名单中"
                 elif self._disallowed_tools and name in self._disallowed_tools:
                     ok, reason = False, f"工具 {name} 已被黑名单禁止"
