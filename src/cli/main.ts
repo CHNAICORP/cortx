@@ -609,7 +609,94 @@ async function main(): Promise<void> {
   }
 
   // ── REPL ──
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  // 斜杠命令列表（用于自动补全）
+  const SLASH_COMMANDS: { cmd: string; desc: string }[] = [
+    { cmd: "/help", desc: "显示帮助" },
+    { cmd: "/tools", desc: "列出工具" },
+    { cmd: "/skills", desc: "列出技能" },
+    { cmd: "/skill ", desc: "调用技能 <name>" },
+    { cmd: "/model ", desc: "切换模型 <pro|flash>" },
+    { cmd: "/mode ", desc: "切换权限 <s|a|y>" },
+    { cmd: "/context", desc: "上下文容量+缓存" },
+    { cmd: "/memory", desc: "查看记忆" },
+    { cmd: "/forget ", desc: "删除记忆 <name>" },
+    { cmd: "/save", desc: "保存会话" },
+    { cmd: "/sessions", desc: "列出会话" },
+    { cmd: "/resume ", desc: "恢复会话 [id]" },
+    { cmd: "/reset", desc: "重置上下文" },
+    { cmd: "/trace", desc: "最后轨迹" },
+    { cmd: "/audit", desc: "审计轨迹" },
+    { cmd: "/kb", desc: "查看知识库" },
+    { cmd: "/init", desc: "初始化项目" },
+    { cmd: "/goal ", desc: "设置目标" },
+    { cmd: "/plan ", desc: "规划模式" },
+    { cmd: "/hooks", desc: "钩子管理" },
+    { cmd: "/exit", desc: "退出" },
+  ];
+
+  // 自动补全提示渲染状态
+  let _hintLines = 0;
+  const CY = "\x1b[36m", GR = "\x1b[90m", YL = "\x1b[33m", RST = "\x1b[0m";
+
+  function clearHint() {
+    if (_hintLines > 0) {
+      for (let i = 0; i < _hintLines; i++) process.stdout.write(`\x1b[B\x1b[2K`);
+      for (let i = 0; i < _hintLines; i++) process.stdout.write(`\x1b[A`);
+      _hintLines = 0;
+    }
+  }
+
+  function renderHint(line: string) {
+    clearHint();
+    let hints: string[] = [];
+    if (line.startsWith("/")) {
+      const matches = SLASH_COMMANDS.filter(c => {
+        const cmd = c.cmd.trim();
+        return cmd.startsWith(line.trim()) || (line.trim().length > 1 && cmd.startsWith(line.trim()));
+      });
+      hints = matches.slice(0, 7).map(c => `  ${CY}${c.cmd.trim()}${RST} ${GR}${c.desc}${RST}`);
+    } else if (line.includes("@")) {
+      const atIdx = line.lastIndexOf("@");
+      const prefix = line.slice(atIdx + 1).split(/\s/)[0];
+      try {
+        const dir = path.dirname(prefix || ".");
+        const filePrefix = path.basename(prefix || ".");
+        const searchDir = dir === "." ? workDir : path.resolve(workDir, dir);
+        const files = fs.readdirSync(searchDir)
+          .filter(f => f.startsWith(filePrefix) && !f.startsWith("."))
+          .slice(0, 7);
+        hints = files.map(f => `  ${YL}@${dir === "." ? "" : dir + "/"}${f}${RST}`);
+      } catch {}
+    }
+    if (hints.length > 0) {
+      process.stdout.write("\x1b[s\n" + hints.join("\n") + "\x1b[u");
+      _hintLines = hints.length + 1;
+    }
+  }
+
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    completer: (line: string): [string[], string] => {
+      if (line.startsWith("/")) {
+        const hits = SLASH_COMMANDS.map(c => c.cmd.trim()).filter(cmd => cmd.startsWith(line.trim()));
+        return [hits.length ? hits : [], line];
+      }
+      if (line.includes("@")) {
+        const atIdx = line.lastIndexOf("@");
+        const prefix = line.slice(atIdx + 1).split(/\s/)[0];
+        try {
+          const dir = path.dirname(prefix || ".");
+          const filePrefix = path.basename(prefix || ".");
+          const searchDir = dir === "." ? workDir : path.resolve(workDir, dir);
+          const files = fs.readdirSync(searchDir).filter(f => f.startsWith(filePrefix));
+          const completions = files.map(f => line.slice(0, atIdx + 1) + (dir === "." ? "" : dir + "/") + f);
+          return [completions, line];
+        } catch {}
+      }
+      return [[], line];
+    },
+  });
   const modeLabels: Record<string, string> = { standard: "🛡", auto: "✎", yolo: "⚠" };
   const modeColors: Record<string, string> = { standard: "\x1b[38;5;82m", auto: "\x1b[38;5;220m", yolo: "\x1b[38;5;196m" };
 
@@ -629,8 +716,8 @@ async function main(): Promise<void> {
     rl.setPrompt(`${mc}${ml}\x1b[0m ${pc}${pct}%\x1b[0m${cacheStr}> `);
   };
 
-  // Shift+Tab to cycle permission mode
-  process.stdin.on("keypress", (_str, key) => {
+  // Shift+Tab to cycle permission mode + live autocomplete hints
+  process.stdin.on("keypress", (_str: string, key: any) => {
     if (key && key.name === "tab" && key.shift) {
       const modes = ["standard", "auto", "yolo"];
       const idx = modes.indexOf(agent.config.permissionMode);
@@ -638,7 +725,22 @@ async function main(): Promise<void> {
       agent.config.permissionMode = next;
       showPrompt();
       rl.prompt();
+      return;
     }
+    // 实时自动补全提示（输入 / 或 @ 时显示下拉）
+    if (key && (key.name === "return" || key.sequence === "\r")) {
+      clearHint();
+      return;
+    }
+    // 延迟一帧让 readline 更新 rl.line
+    setImmediate(() => {
+      const line = rl.line || "";
+      if (line.startsWith("/") || line.includes("@")) {
+        renderHint(line);
+      } else {
+        clearHint();
+      }
+    });
   });
 
   console.log("Cortex Agent REPL — /help /exit\n");
@@ -646,6 +748,7 @@ async function main(): Promise<void> {
   rl.prompt();
 
   for await (const line of rl) {
+    clearHint();
     const q = line.trim();
     if (!q) { showPrompt(); rl.prompt(); continue; }
     if (["/exit", "/quit", "/q"].includes(q)) {
