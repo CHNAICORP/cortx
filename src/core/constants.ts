@@ -22,7 +22,7 @@ export const USER_AGENT_SHORT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Apple
 export const PRODUCT_NAME = "cortex-agent";
 
 // ── MCP 客户端版本（统一，消除 "1.0" vs "2.7.0" 不一致）──
-export const MCP_CLIENT_VERSION = "2.9.7";
+export const MCP_CLIENT_VERSION = "2.9.8";
 export const MCP_CLIENT_INFO = { name: PRODUCT_NAME, version: MCP_CLIENT_VERSION };
 
 // ── ANSI 终端色板 ──

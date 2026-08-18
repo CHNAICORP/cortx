@@ -136,7 +136,7 @@ function formatSearchResults(query: string, engine: string, results: SearchItem[
     out.push(`  [${i + 1}] ${r.title.slice(0, 120)}`);
     out.push(`      🔗 ${r.url}`);
     if (r.snippet) {
-      const maxLen = 1500;
+      const maxLen = 2000;
       const snip = r.snippet.slice(0, maxLen);
       out.push(`      ${snip}${r.snippet.length > maxLen ? " [...已截断]" : ""}`);
     }
@@ -155,7 +155,7 @@ registry.register(
     + "参数:\n"
     + "  query           搜索关键词 (必填)\n"
     + "  allowed_domains 限定搜索域名，逗号分隔 (可选，如 'github.com,stackoverflow.com')\n"
-    + "  max_results     最大结果数 (可选，默认 10)\n"
+    + "  max_results     最大结果数 (可选，默认 15)\n"
     + "用法: web_search(query=\"Python 3.13 新特性\")\n"
     + "      web_search(query=\"React hooks\", allowed_domains=\"reactjs.org,github.com\")",
   RiskLevel.SAFE, Capability.NET_SEARCH,
@@ -174,7 +174,7 @@ registry.register(
       wsCfg = (loadSettings().web_search as Record<string, unknown>) || {};
     } catch { /* use defaults */ }
     const provider = String(wsCfg.provider || "duckduckgo");
-    const n = maxResultsArg > 0 ? maxResultsArg : Number(wsCfg.max_results || 10);
+    const n = maxResultsArg > 0 ? maxResultsArg : Number(wsCfg.max_results || 15);
     const timeout = Number(wsCfg.timeout || 8) * 1000;
     const blocked = ["bing.com", "duckduckgo.com", "google.com", "baidu.com", "csdn.net"];
 
@@ -238,45 +238,54 @@ registry.register(
       } catch { /* fall through */ }
     }
 
-    // ── Bing CN (国内国际通用，0.3s 极快，用 fetch 避免代理干扰) ──
+    // ── Bing CN (双语搜索：中文优先，结果不足时自动英文补充) ──
     if (!rawResults.length) {
-      try {
-        const bingUrl = `https://cn.bing.com/search?q=${encoded}&ensearch=1&setlang=en`;
-        const resp = await fetch(bingUrl, {
-          signal: AbortSignal.timeout(5000),
-          headers: { "User-Agent": USER_AGENT_SHORT },
-        });
-        const html = await resp.text();
-        // 提取完整 b_algo 块（包含标题+URL+所有文本内容，非仅 <p> 段落）
-        const blockRe = /<li[^>]*class="b_algo"[^>]*>([\s\S]*?)<\/li>/gi;
-        let blockMatch: RegExpExecArray | null;
-        while ((blockMatch = blockRe.exec(html)) !== null && rawResults.length < n) {
-          const block = blockMatch[1];
-          // 标题
-          const h2 = block.match(/<h2[^>]*><a[^>]*>(.*?)<\/a>/i);
-          const title = h2 ? h2[1].replace(/<[^>]+>/g, '').trim().replace(/&amp;/g, '&') : "";
-          // URL (cite 标签)
-          const cite = block.match(/<cite[^>]*>(.*?)<\/cite>/i);
-          const rawUrl = cite ? cite[1].replace(/<[^>]+>/g, '').trim() : "";
-          const url = rawUrl.startsWith('http') ? rawUrl.split('›')[0].trim().replace(/\s+/g, '') : 'https://' + rawUrl.split('›')[0].trim().replace(/\s+/g, '');
-          // 富摘要：提取整个块的纯文本，去掉标题和URL部分
-          const fullText = block
-            .replace(/<[^>]+>/g, ' ')
-            .replace(/&ensp;/g, ' ').replace(/&#0183;/g, ' • ').replace(/&amp;/g, '&')
-            .replace(/&nbsp;/g, ' ').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
-            .replace(/\s+/g, ' ').trim();
-          // 去掉标题和URL前缀，保留摘要正文
-          let snippet = fullText;
-          if (title) snippet = snippet.replace(title, '').trim();
-          if (rawUrl) snippet = snippet.replace(rawUrl, '').trim();
-          // 截断到 600 字
-          if (snippet.length > 600) snippet = snippet.slice(0, 600) + ' [...]';
-          if (title && url) {
-            rawResults.push({ title, url, snippet });
+      const hasCJK = /[\u4e00-\u9fff\u3040-\u30ff]/.test(query);
+      const searchBing = async (searchUrl: string): Promise<SearchItem[]> => {
+        try {
+          const resp = await fetch(searchUrl, {
+            signal: AbortSignal.timeout(5000),
+            headers: { "User-Agent": USER_AGENT_SHORT },
+          });
+          const html = await resp.text();
+          const blockRe = /<li[^>]*class="b_algo"[^>]*>([\s\S]*?)<\/li>/gi;
+          const items: SearchItem[] = [];
+          let blockMatch: RegExpExecArray | null;
+          while ((blockMatch = blockRe.exec(html)) !== null && items.length < n) {
+            const block = blockMatch[1];
+            const h2 = block.match(/<h2[^>]*><a[^>]*>(.*?)<\/a>/i);
+            const title = h2 ? h2[1].replace(/<[^>]+>/g, '').trim().replace(/&amp;/g, '&') : "";
+            const cite = block.match(/<cite[^>]*>(.*?)<\/cite>/i);
+            const rawUrl = cite ? cite[1].replace(/<[^>]+>/g, '').trim() : "";
+            const url = rawUrl.startsWith('http') ? rawUrl.split('›')[0].trim().replace(/\s+/g, '') : 'https://' + rawUrl.split('›')[0].trim().replace(/\s+/g, '');
+            const fullText = block
+              .replace(/<[^>]+>/g, ' ')
+              .replace(/&ensp;/g, ' ').replace(/&#0183;/g, ' • ').replace(/&amp;/g, '&')
+              .replace(/&nbsp;/g, ' ').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+              .replace(/\s+/g, ' ').trim();
+            let snippet = fullText;
+            if (title) snippet = snippet.replace(title, '').trim();
+            if (rawUrl) snippet = snippet.replace(rawUrl, '').trim();
+            if (snippet.length > 600) snippet = snippet.slice(0, 600) + ' [...]';
+            if (title && url) items.push({ title, url, snippet });
           }
+          return items;
+        } catch { return []; }
+      };
+      // 第一次：中文用 setlang=zh-CN（避免返回英文通用列表页），英文用 ensearch=1
+      const url1 = hasCJK
+        ? `https://cn.bing.com/search?q=${encoded}&setlang=zh-CN`
+        : `https://cn.bing.com/search?q=${encoded}&ensearch=1&setlang=en`;
+      rawResults = await searchBing(url1);
+      engineUsed = "Bing";
+      // 中文搜索结果不足 5 条时，自动用国际 Bing 补充搜索
+      if (hasCJK && rawResults.length < 5) {
+        const enResults = await searchBing(`https://cn.bing.com/search?q=${encoded}&ensearch=1&setlang=en`);
+        const seen = new Set(rawResults.map(r => r.url));
+        for (const r of enResults) {
+          if (!seen.has(r.url)) { rawResults.push(r); seen.add(r.url); }
         }
-        engineUsed = "Bing";
-      } catch { /* fall through */ }
+      }
     }
 
     // ── DuckDuckGo Instant Answer API (JSON — 备用，需代理) ──
@@ -328,6 +337,15 @@ registry.register(
       } catch { /* fall through */ }
     }
 
+    // ── 质量过滤：移除日历页面、通用 Top10 列表页等低质量结果 ──
+    rawResults = rawResults.filter(r => {
+      const t = r.title.toLowerCase(), u = r.url.toLowerCase();
+      if (/calendar/i.test(t) || /\/calendar/i.test(u)) return false;
+      if (/top 10 best ai apps/i.test(t) || /top10\.com\/best/i.test(u)) return false;
+      if (/best ai apps & websites/i.test(t)) return false;
+      return true;
+    });
+
     // ── 后处理: 域名过滤 + 去重 + 截断 ──
     let filtered = rawResults.filter(r => filterDomains(r.url, allowed, allowed ? undefined : blocked));
     if (!filtered.length && rawResults.length) filtered = rawResults;
@@ -341,7 +359,7 @@ registry.register(
     }
 
     // ── 内容增强: 并行抓取前 2 条结果的页面内容（参考 Continue.dev 做法）──
-    const enrichTopN = Math.min(2, filtered.length);
+    const enrichTopN = Math.min(3, filtered.length);
     await Promise.allSettled(filtered.slice(0, enrichTopN).map(async (r) => {
       try {
         const resp = await fetch(r.url, {
@@ -352,7 +370,7 @@ registry.register(
         const html = await resp.text();
         let text = htmlToReadable(html);
         if (text.length > 100) {
-          r.snippet = text.slice(0, 1500);
+          r.snippet = text.slice(0, 2000);
         }
       } catch { /* 抓取失败不影响搜索结果 */ }
     }));
@@ -470,7 +488,7 @@ registry.register(
     // ── 策略 1: 原始 HTTP + HTML 解析（默认，无需外部服务）──
     const isBlockedDomain = isSlowDomain(url) || url.includes("github.com") || url.includes("huggingface.co");
     try {
-      const html = await httpRequest(url, 'GET', undefined, 5000);
+      const html = await httpRequest(url, 'GET', undefined, 8000);
       const ct = html.startsWith("{") ? "application/json" : "text/html";
 
       let text: string;

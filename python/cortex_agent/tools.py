@@ -647,11 +647,11 @@ def _format_search_results(query: str, engine: str, results: list) -> str:
     for i, r in enumerate(results, 1):
         title = r.get("title", "")[:120]
         url = r.get("url", "")
-        snippet = r.get("snippet", "")[:1500]
+        snippet = r.get("snippet", "")[:2000]
         out.append(f"  [{i}] {title}")
         out.append(f"      🔗 {url}")
         if snippet:
-            trunc = " [...已截断]" if len(r.get("snippet", "")) > 1500 else ""
+            trunc = " [...已截断]" if len(r.get("snippet", "")) > 2000 else ""
             out.append(f"      {snippet}{trunc}")
         out.append("")
     return "\n".join(out)
@@ -662,7 +662,7 @@ def _format_search_results(query: str, engine: str, results: list) -> str:
     "参数:\n"
     "  query           搜索关键词 (必填)\n"
     "  allowed_domains 限定搜索域名，逗号分隔 (可选，如 'github.com,stackoverflow.com')\n"
-    "  max_results     最大结果数 (可选，默认 10)\n"
+    "  max_results     最大结果数 (可选，默认 15)\n"
     "用法: web_search(query=\"Python 3.13 新特性\")\n"
     "      web_search(query=\"React hooks\", allowed_domains=\"reactjs.org,github.com\")",
     risk=RiskLevel.SAFE, capability=Capability.NET_SEARCH)
@@ -679,7 +679,7 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
     # ── 解析参数 ──
     cfg = _load_web_search_config()
     provider = cfg.get("provider", "duckduckgo")
-    n = int(max_results) if max_results and int(max_results) > 0 else int(cfg.get("max_results", 10))
+    n = int(max_results) if max_results and int(max_results) > 0 else int(cfg.get("max_results", 15))
     timeout = int(cfg.get("timeout", 10))
     opener = _build_opener()
     encoded = urllib.parse.quote(query)
@@ -788,46 +788,57 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
         except Exception:
             pass
 
-    # ── Bing CN (国内国际通用，0.3s 极快) ──
+    # ── Bing CN (双语搜索：中文优先，结果不足时自动英文补充) ──
     if not raw_results:
-        try:
-            bing_url = f"https://cn.bing.com/search?q={encoded}&ensearch=1&setlang=en"
-            req = urllib.request.Request(bing_url, headers={
-                "User-Agent": USER_AGENT_SHORT,
-            })
-            with opener.open(req, timeout=5) as r:
-                html = r.read().decode("utf-8", errors="ignore")
-            # 提取完整 b_algo 块（包含标题+URL+所有文本，非仅 <p> 段落）
-            block_re = re.compile(r'<li[^>]*class="b_algo"[^>]*>([\s\S]*?)</li>', re.IGNORECASE)
-            for bm in block_re.finditer(html):
-                if len(raw_results) >= n:
-                    break
-                block = bm.group(1)
-                # 标题
-                h2 = re.search(r'<h2[^>]*><a[^>]*>(.*?)</a>', block, re.IGNORECASE)
-                title = re.sub(r'<[^>]+>', '', h2.group(1)).strip().replace('&amp;', '&') if h2 else ""
-                # URL (cite)
-                cite = re.search(r'<cite[^>]*>(.*?)</cite>', block, re.IGNORECASE)
-                raw_url = re.sub(r'<[^>]+>', '', cite.group(1)).strip() if cite else ""
-                raw_url_clean = raw_url.split('›')[0].strip().replace(' ', '')
-                url = raw_url_clean if raw_url_clean.startswith('http') else 'https://' + raw_url_clean
-                # 富摘要：整块纯文本，去掉标题和URL
-                full_text = re.sub(r'<[^>]+>', ' ', block)
-                full_text = full_text.replace('&ensp;', ' ').replace('&#0183;', ' • ').replace('&amp;', '&')
-                full_text = full_text.replace('&nbsp;', ' ').replace('&quot;', '"').replace('&#39;', "'")
-                full_text = re.sub(r'\s+', ' ', full_text).strip()
-                snippet = full_text
-                if title:
-                    snippet = snippet.replace(title, '').strip()
-                if raw_url:
-                    snippet = snippet.replace(raw_url, '').strip()
-                if len(snippet) > 600:
-                    snippet = snippet[:600] + ' [...]'
-                if title and url:
-                    raw_results.append({"title": title, "url": url, "snippet": snippet})
-            engine_used = "Bing"
-        except Exception:
-            pass
+        def _bing_search(search_url):
+            """单次 Bing 搜索，返回结果列表。"""
+            try:
+                req = urllib.request.Request(search_url, headers={"User-Agent": USER_AGENT_SHORT})
+                with opener.open(req, timeout=8) as r:
+                    html = r.read().decode("utf-8", errors="ignore")
+                block_re = re.compile(r'<li[^>]*class="b_algo"[^>]*>([\s\S]*?)</li>', re.IGNORECASE)
+                items = []
+                for bm in block_re.finditer(html):
+                    if len(items) >= n:
+                        break
+                    block = bm.group(1)
+                    h2 = re.search(r'<h2[^>]*><a[^>]*>(.*?)</a>', block, re.IGNORECASE)
+                    title = re.sub(r'<[^>]+>', '', h2.group(1)).strip().replace('&amp;', '&') if h2 else ""
+                    cite = re.search(r'<cite[^>]*>(.*?)</cite>', block, re.IGNORECASE)
+                    raw_url = re.sub(r'<[^>]+>', '', cite.group(1)).strip() if cite else ""
+                    raw_url_clean = raw_url.split('›')[0].strip().replace(' ', '')
+                    url = raw_url_clean if raw_url_clean.startswith('http') else 'https://' + raw_url_clean
+                    full_text = re.sub(r'<[^>]+>', ' ', block)
+                    full_text = full_text.replace('&ensp;', ' ').replace('&#0183;', ' • ').replace('&amp;', '&')
+                    full_text = full_text.replace('&nbsp;', ' ').replace('&quot;', '"').replace('&#39;', "'")
+                    full_text = re.sub(r'\s+', ' ', full_text).strip()
+                    snippet = full_text
+                    if title:
+                        snippet = snippet.replace(title, '').strip()
+                    if raw_url:
+                        snippet = snippet.replace(raw_url, '').strip()
+                    if len(snippet) > 600:
+                        snippet = snippet[:600] + ' [...]'
+                    if title and url:
+                        items.append({"title": title, "url": url, "snippet": snippet})
+                return items
+            except Exception:
+                return []
+
+        has_cjk = bool(re.search(r'[\u4e00-\u9fff\u3040-\u30ff]', query))
+        # 第一次：中文用 setlang=zh-CN（避免返回英文通用列表页），英文用 ensearch=1
+        url1 = (f"https://cn.bing.com/search?q={encoded}&setlang=zh-CN" if has_cjk
+                else f"https://cn.bing.com/search?q={encoded}&ensearch=1&setlang=en")
+        raw_results = _bing_search(url1)
+        engine_used = "Bing"
+        # 中文搜索结果不足 5 条时，自动用国际 Bing 补充搜索
+        if has_cjk and len(raw_results) < 5:
+            en_results = _bing_search(f"https://cn.bing.com/search?q={encoded}&ensearch=1&setlang=en")
+            seen = {r["url"] for r in raw_results}
+            for r in en_results:
+                if r["url"] not in seen:
+                    raw_results.append(r)
+                    seen.add(r["url"])
 
     # ── DuckDuckGo Instant Answer API (JSON — 备用，需代理) ──
     if not raw_results:
@@ -895,6 +906,19 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
         except Exception:
             pass
 
+    # ── 质量过滤：移除日历页面、通用 Top10 列表页等低质量结果 ──
+    def _is_low_quality(r):
+        t = r.get("title", "").lower()
+        u = r.get("url", "").lower()
+        if "calendar" in t or "/calendar" in u:
+            return True
+        if "top 10 best ai apps" in t or "top10.com/best" in u:
+            return True
+        if "best ai apps & websites" in t:
+            return True
+        return False
+    raw_results = [r for r in raw_results if not _is_low_quality(r)]
+
     # ── 后处理: 域名过滤 + 去重 + 截断 ──
     filtered = [r for r in raw_results if _filter_domains(r["url"], allowed, blocked if not allowed else None)]
     if not filtered and raw_results:
@@ -922,12 +946,12 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
             text = text.replace('&amp;', '&').replace('&nbsp;', ' ').replace('&quot;', '"').replace('&#39;', "'")
             text = re.sub(r'\s+', ' ', text).strip()
             if len(text) > 100:
-                r["snippet"] = text[:1500]
+                r["snippet"] = text[:2000]
         except Exception:
             pass
         return r
 
-    enrich_top = min(2, len(filtered))
+    enrich_top = min(3, len(filtered))
     with _cf.ThreadPoolExecutor(max_workers=enrich_top) as pool:
         list(pool.map(_enrich, filtered[:enrich_top]))
 
@@ -1032,7 +1056,7 @@ def web_fetch(work_dir: str, url: str, max_chars: int = 0) -> str:
             headers={"Content-Type": "application/json"},
             method="POST"
         )
-        with opener.open(fc_req, timeout=8 if _is_blocked else 5) as r:
+        with opener.open(fc_req, timeout=8) as r:
             fc_result = _json.loads(r.read().decode("utf-8", errors="ignore"))
         md = fc_result.get("data", {}).get("markdown", "")
         title = fc_result.get("data", {}).get("metadata", {}).get("title", "")
