@@ -182,6 +182,35 @@ registry.register(
     let rawResults: SearchItem[] = [];
     let engineUsed = "";
 
+    // ── Firecrawl Search（默认引擎，免费 keyless，国内直连）──
+    if (!rawResults.length) {
+      try {
+        const fcResp = await fetch("https://api.firecrawl.dev/v1/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            query,
+            limit: n,
+            ...(allowed ? { includeDomains: allowed } : {}),
+          }),
+          signal: AbortSignal.timeout(10000),
+        });
+        if (fcResp.ok) {
+          const fcData = await fcResp.json() as { data?: Array<{ url?: string; title?: string; description?: string }> };
+          for (const item of (fcData.data || [])) {
+            if (item.url && item.title) {
+              rawResults.push({
+                title: item.title,
+                url: item.url,
+                snippet: item.description || "",
+              });
+            }
+          }
+          if (rawResults.length) engineUsed = "Firecrawl";
+        }
+      } catch { /* fall through */ }
+    }
+
     // ── Brave Search API ──
     if (provider === "brave" && wsCfg.brave_api_key) {
       try {
@@ -442,7 +471,35 @@ registry.register(
       return cached[1] + "\n[缓存命中]";
     }
 
-    // ── 策略 1: 原始 HTTP + HTML 解析（默认，无需外部服务）──
+    // ── 策略 0: Firecrawl Scrape（默认，干净 Markdown，国内直连）──
+    try {
+      const fcResp = await fetch("https://api.firecrawl.dev/v1/scrape", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, formats: ["markdown"] }),
+        signal: AbortSignal.timeout(10000),
+      });
+      if (fcResp.ok) {
+        const fcData = await fcResp.json() as { data?: { markdown?: string; metadata?: { title?: string } } };
+        const md = fcData.data?.markdown || "";
+        const title = fcData.data?.metadata?.title || "";
+        if (md.length > 100) {
+          let text = md;
+          if (text.length > limit) {
+            const keepHead = Math.floor(limit * 0.8);
+            const keepTail = Math.floor(limit * 0.15);
+            text = text.slice(0, keepHead) + `\n\n[... 已截断，原文 ${text.length} 字符 ...]\n\n` + text.slice(-keepTail);
+          }
+          const header = `--- ${url} ---${title ? `\n标题: ${title}` : ""}\n\n`;
+          const result = header + text;
+          if (_fetchCache.size >= FETCH_CACHE_MAX) _fetchCache.clear();
+          _fetchCache.set(cacheKey, [Date.now(), result]);
+          return result;
+        }
+      }
+    } catch { /* fall through to HTTP */ }
+
+    // ── 策略 1: 原始 HTTP + HTML 解析（回退）──
     try {
       const html = await httpRequest(url, 'GET', undefined, 10000);
       const ct = html.startsWith("{") ? "application/json" : "text/html";

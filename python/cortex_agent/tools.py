@@ -741,6 +741,31 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
         except Exception:
             pass
 
+    # ── Firecrawl Search（默认引擎，免费 keyless，国内直连）──
+    if not raw_results:
+        try:
+            import json as _json
+            fc_data = _json.dumps({"query": query, "limit": n}).encode()
+            fc_req = urllib.request.Request(
+                "https://api.firecrawl.dev/v1/search",
+                data=fc_data,
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with opener.open(fc_req, timeout=10) as r:
+                fc_result = _json.loads(r.read().decode("utf-8", errors="ignore"))
+            for item in fc_result.get("data", []):
+                if item.get("url") and item.get("title"):
+                    raw_results.append({
+                        "title": item["title"],
+                        "url": item["url"],
+                        "snippet": item.get("description", ""),
+                    })
+            if raw_results:
+                engine_used = "Firecrawl"
+        except Exception:
+            pass
+
     # ── SerpAPI (Google) ──
     if not raw_results and provider == "serpapi" and cfg.get("serpapi_api_key"):
         try:
@@ -962,7 +987,36 @@ def web_fetch(work_dir: str, url: str, max_chars: int = 0) -> str:
         if _time.time() - cached_time < _FETCH_CACHE_TTL:
             return cached_text + "\n[缓存命中]"
 
-    # ── 策略 1: Jina Reader（快速、干净 Markdown，处理 JS 渲染）──
+    # ── 策略 0: Firecrawl Scrape（默认，干净 Markdown，国内直连）──
+    try:
+        import json as _json
+        fc_data = _json.dumps({"url": url, "formats": ["markdown"]}).encode()
+        fc_req = urllib.request.Request(
+            "https://api.firecrawl.dev/v1/scrape",
+            data=fc_data,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with opener.open(fc_req, timeout=10) as r:
+            fc_result = _json.loads(r.read().decode("utf-8", errors="ignore"))
+        md = fc_result.get("data", {}).get("markdown", "")
+        title = fc_result.get("data", {}).get("metadata", {}).get("title", "")
+        if len(md) > 100:
+            text = md
+            if len(text) > limit:
+                keep_head = int(limit * 0.8)
+                keep_tail = int(limit * 0.15)
+                text = text[:keep_head] + f"\n\n[... 已截断，原文 {len(text)} 字符 ...]\n\n" + text[-keep_tail:]
+            header = f"--- {url} ---" + (f"\n标题: {title}" if title else "") + "\n\n"
+            result = header + text
+            if len(_fetch_cache) >= _FETCH_CACHE_MAX:
+                _fetch_cache.clear()
+            _fetch_cache[cache_key] = (_time.time(), result)
+            return result
+    except Exception:
+        pass
+
+    # ── 策略 1: Jina Reader（备用，干净 Markdown，处理 JS 渲染）──
     try:
         jina_url = f"https://r.jina.ai/{url}"
         jina_req = urllib.request.Request(jina_url, headers={
