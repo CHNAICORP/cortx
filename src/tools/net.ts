@@ -134,7 +134,7 @@ function formatSearchResults(query: string, engine: string, results: SearchItem[
   results.forEach((r, i) => {
     out.push(`  [${i + 1}] ${r.title.slice(0, 120)}`);
     out.push(`      🔗 ${r.url}`);
-    if (r.snippet) out.push(`      ${r.snippet.slice(0, 400)}`);
+    if (r.snippet) out.push(`      ${r.snippet.slice(0, 600)}`);
     out.push("");
   });
   return out.join("\n");
@@ -146,11 +146,11 @@ const SEARCH_CACHE_MAX = 50;
 
 // ── 联网搜索 (多引擎) ──
 registry.register(
-  "联网搜索网页 — 返回标题、URL 和摘要。找到页面后可用 web_fetch 读取全文。\n"
+  "联网搜索网页 — 返回标题、URL 和摘要。先看摘要是否已包含答案，够用就不必 web_fetch。\n"
     + "参数:\n"
     + "  query           搜索关键词 (必填)\n"
     + "  allowed_domains 限定搜索域名，逗号分隔 (可选，如 'github.com,stackoverflow.com')\n"
-    + "  max_results     最大结果数 (可选，默认 5)\n"
+    + "  max_results     最大结果数 (可选，默认 10)\n"
     + "用法: web_search(query=\"Python 3.13 新特性\")\n"
     + "      web_search(query=\"React hooks\", allowed_domains=\"reactjs.org,github.com\")",
   RiskLevel.SAFE, Capability.NET_SEARCH,
@@ -170,7 +170,7 @@ registry.register(
     } catch { /* use defaults */ }
     const provider = String(wsCfg.provider || "duckduckgo");
     const n = maxResultsArg > 0 ? maxResultsArg : Number(wsCfg.max_results || 10);
-    const timeout = Number(wsCfg.timeout || 10) * 1000;
+    const timeout = Number(wsCfg.timeout || 8) * 1000;
     const blocked = ["bing.com", "duckduckgo.com", "google.com", "baidu.com", "csdn.net"];
 
     // ── 检查缓存 ──
@@ -238,7 +238,7 @@ registry.register(
       try {
         const html = await httpRequest(
           `https://api.duckduckgo.com/?q=${encoded}&format=json&no_html=1&skip_disambig=1`,
-          'GET', undefined, 8000
+          'GET', undefined, 5000
         );
         const data = JSON.parse(html);
         if (data.AbstractText && data.AbstractText.trim()) {
@@ -257,7 +257,7 @@ registry.register(
     if (!rawResults.length) {
       try {
         const body = new URLSearchParams({ q: query }).toString();
-        const html = await httpRequest('https://lite.duckduckgo.com/lite/', 'POST', body, 8000);
+        const html = await httpRequest('https://lite.duckduckgo.com/lite/', 'POST', body, 5000);
         // DDG Lite: nofollow links
         let linkRe = /<a[^>]*?rel=["']nofollow["'][^>]*?href=["']([^"']+)["'][^>]*?>(.*?)<\/a>/gi;
         let match: RegExpExecArray | null;
@@ -365,6 +365,30 @@ function extractPageMetadata(html: string): { title: string; description: string
   return meta;
 }
 
+// ── Jina Reader: 快速内容提取（优先使用，失败回退到原始 HTTP）──
+async function jinaReader(url: string, timeout = 8000): Promise<string | null> {
+  const jinaUrl = `https://r.jina.ai/${url}`;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
+    const resp = await fetch(jinaUrl, {
+      signal: controller.signal,
+      headers: { "User-Agent": "cortex-agent", "Accept": "text/plain" },
+    });
+    clearTimeout(timer);
+    if (!resp.ok) return null;
+    const text = await resp.text();
+    if (!text || text.length < 50) return null;
+    return text.trim();
+  } catch { return null; }
+}
+
+// ── 易超时域名过滤 ──
+const SLOW_DOMAINS = ["news.google.com", "duckduckgo.com", "lite.duckduckgo.com", "html.duckduckgo.com", "google.com/search", "bing.com/search"];
+function isSlowDomain(url: string): boolean {
+  return SLOW_DOMAINS.some(d => url.includes(d));
+}
+
 // ── 网页抓取缓存 ──
 const _fetchCache = new Map<string, [number, string]>();
 const FETCH_CACHE_MAX = 20;
@@ -372,12 +396,13 @@ const FETCH_CACHE_TTL = 300000; // 5 分钟
 
 // ── 抓取网页全文 ──
 registry.register(
-  "抓取网页全文并提取可读文本。适合读取 web_search 找到的具体页面。\n"
+  "抓取网页全文并提取可读文本。仅在 web_search 摘要不够时使用，避免不必要抓取。\n"
     + "参数:\n"
     + "  url       目标网址 (必填，须以 http:// 或 https:// 开头)\n"
-    + "  max_chars 最大返回字符数 (可选，默认 4000，最大 20000)\n"
+    + "  max_chars 最大返回字符数 (可选，默认 8000，最大 20000)\n"
     + "用法: web_fetch(url=\"https://docs.python.org/3/whatsnew/3.13.html\")\n"
-    + "      web_fetch(url=\"https://long-article.com\", max_chars=8000)",
+    + "      web_fetch(url=\"https://long-article.com\", max_chars=8000)\n"
+    + "⚠️ 避免抓取 news.google.com、duckduckgo.com 等易超时站点。",
   RiskLevel.SAFE, Capability.NET_HTTP,
   { workDir: "string", url: "string", max_chars: "integer" },
   async function web_fetch(_wd: string, args: Record<string, unknown>): Promise<string> {
@@ -386,6 +411,11 @@ registry.register(
     const maxCharsArg = Number(args["max_chars"] || 0);
     const limit = Math.min(maxCharsArg > 0 ? maxCharsArg : 8000, 20000);
 
+    // ── 易超时域名警告 ──
+    if (isSlowDomain(url)) {
+      return `(⚠️) ${url} 是已知的慢速域名，抓取可能超时。建议从搜索结果中选择其他来源。`;
+    }
+
     // ── 检查缓存 ──
     const cacheKey = `${url}|${limit}`;
     const cached = _fetchCache.get(cacheKey);
@@ -393,9 +423,25 @@ registry.register(
       return cached[1] + "\n[缓存命中]";
     }
 
+    // ── 策略 1: Jina Reader（快速、干净 Markdown，处理 JS 渲染）──
+    const jinaText = await jinaReader(url, 8000);
+    if (jinaText && jinaText.length > 100) {
+      let text = jinaText;
+      if (text.length > limit) {
+        const keepHead = Math.floor(limit * 0.8);
+        const keepTail = Math.floor(limit * 0.15);
+        text = text.slice(0, keepHead) + `\n\n[... 已截断，原文 ${text.length} 字符 ...]\n\n` + text.slice(-keepTail);
+      }
+      const result = `--- ${url} ---\n\n${text}`;
+      if (_fetchCache.size >= FETCH_CACHE_MAX) _fetchCache.clear();
+      _fetchCache.set(cacheKey, [Date.now(), result]);
+      return result;
+    }
+
+    // ── 策略 2: 原始 HTTP + HTML 解析（回退）──
     try {
-      const html = await httpRequest(url, 'GET', undefined, 15000);
-      const ct = html.startsWith("{") ? "application/json" : "text/html"; // 简化判断
+      const html = await httpRequest(url, 'GET', undefined, 10000);
+      const ct = html.startsWith("{") ? "application/json" : "text/html";
 
       let text: string;
       let header: string;
@@ -414,7 +460,6 @@ registry.register(
 
       if (!text.trim()) return `--- ${url} ---\n(无有效文本)`;
 
-      // ── 智能截断: 保留开头和结尾 ──
       if (text.length > limit) {
         const keepHead = Math.floor(limit * 0.8);
         const keepTail = Math.floor(limit * 0.15);
@@ -422,11 +467,8 @@ registry.register(
       }
 
       const result = header + text;
-
-      // ── 写入缓存 ──
       if (_fetchCache.size >= FETCH_CACHE_MAX) _fetchCache.clear();
       _fetchCache.set(cacheKey, [Date.now(), result]);
-
       return result;
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);

@@ -656,11 +656,11 @@ def _format_search_results(query: str, engine: str, results: list) -> str:
 
 
 @registry.register(
-    "联网搜索网页 — 返回标题、URL 和摘要。找到页面后可用 web_fetch 读取全文。\n"
+    "联网搜索网页 — 返回标题、URL 和摘要。先看摘要是否已包含答案，够用就不必 web_fetch。\n"
     "参数:\n"
     "  query           搜索关键词 (必填)\n"
     "  allowed_domains 限定搜索域名，逗号分隔 (可选，如 'github.com,stackoverflow.com')\n"
-    "  max_results     最大结果数 (可选，默认 5)\n"
+    "  max_results     最大结果数 (可选，默认 10)\n"
     "用法: web_search(query=\"Python 3.13 新特性\")\n"
     "      web_search(query=\"React hooks\", allowed_domains=\"reactjs.org,github.com\")",
     risk=RiskLevel.SAFE, capability=Capability.NET_SEARCH)
