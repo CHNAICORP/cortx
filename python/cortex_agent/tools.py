@@ -646,17 +646,18 @@ def _format_search_results(query: str, engine: str, results: list) -> str:
     for i, r in enumerate(results, 1):
         title = r.get("title", "")[:120]
         url = r.get("url", "")
-        snippet = r.get("snippet", "")[:600]
+        snippet = r.get("snippet", "")[:1500]
         out.append(f"  [{i}] {title}")
         out.append(f"      🔗 {url}")
         if snippet:
-            out.append(f"      {snippet}")
+            trunc = " [...已截断]" if len(r.get("snippet", "")) > 1500 else ""
+            out.append(f"      {snippet}{trunc}")
         out.append("")
     return "\n".join(out)
 
 
 @registry.register(
-    "联网搜索网页 — 返回标题、URL 和摘要。先看摘要是否已包含答案，够用就不必 web_fetch。\n"
+    "联网搜索网页 — 返回标题、URL 和富内容（前2条自动抓取页面正文）。多数情况搜索结果已包含足够信息，无需再 web_fetch。\n"
     "参数:\n"
     "  query           搜索关键词 (必填)\n"
     "  allowed_domains 限定搜索域名，逗号分隔 (可选，如 'github.com,stackoverflow.com')\n"
@@ -807,7 +808,8 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
                 # URL (cite)
                 cite = re.search(r'<cite[^>]*>(.*?)</cite>', block, re.IGNORECASE)
                 raw_url = re.sub(r'<[^>]+>', '', cite.group(1)).strip() if cite else ""
-                url = raw_url if raw_url.startswith('http') else 'https://' + raw_url.split('›')[0].strip()
+                raw_url_clean = raw_url.split('›')[0].strip().replace(' ', '')
+                url = raw_url_clean if raw_url_clean.startswith('http') else 'https://' + raw_url_clean
                 # 富摘要：整块纯文本，去掉标题和URL
                 full_text = re.sub(r'<[^>]+>', ' ', block)
                 full_text = full_text.replace('&ensp;', ' ').replace('&#0183;', ' • ').replace('&amp;', '&')
@@ -895,7 +897,7 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
     # ── 后处理: 域名过滤 + 去重 + 截断 ──
     filtered = [r for r in raw_results if _filter_domains(r["url"], allowed, blocked if not allowed else None)]
     if not filtered and raw_results:
-        filtered = raw_results  # 域名过滤太严格时回退
+        filtered = raw_results
     filtered = _dedup_results(filtered)[:n]
 
     if not filtered:
@@ -903,6 +905,30 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
                 f"  1. 使用更通用的搜索词\n"
                 f"  2. 在 settings.json 中配置 web_search.provider 为 brave/serpapi/tavily\n"
                 f"  3. 检查网络连接)")
+
+    # ── 内容增强: 并行抓取前 2 条结果的页面内容 ──
+    import concurrent.futures as _cf
+    def _enrich(r):
+        try:
+            req = urllib.request.Request(r["url"], headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            })
+            with _build_opener().open(req, timeout=3) as resp:
+                html = resp.read(102400).decode("utf-8", errors="ignore")
+            text = re.sub(r'<script[\s\S]*?</script>', '', html, flags=re.I)
+            text = re.sub(r'<style[\s\S]*?</style>', '', text, flags=re.I)
+            text = re.sub(r'<[^>]+>', ' ', text)
+            text = text.replace('&amp;', '&').replace('&nbsp;', ' ').replace('&quot;', '"').replace('&#39;', "'")
+            text = re.sub(r'\s+', ' ', text).strip()
+            if len(text) > 100:
+                r["snippet"] = text[:1500]
+        except Exception:
+            pass
+        return r
+
+    enrich_top = min(2, len(filtered))
+    with _cf.ThreadPoolExecutor(max_workers=enrich_top) as pool:
+        list(pool.map(_enrich, filtered[:enrich_top]))
 
     output = _format_search_results(query, engine_used, filtered)
 

@@ -135,8 +135,9 @@ function formatSearchResults(query: string, engine: string, results: SearchItem[
     out.push(`  [${i + 1}] ${r.title.slice(0, 120)}`);
     out.push(`      🔗 ${r.url}`);
     if (r.snippet) {
-      const snip = r.snippet.slice(0, 600);
-      out.push(`      ${snip}${r.snippet.length > 600 ? " [...]" : ""}`);
+      const maxLen = 1500;
+      const snip = r.snippet.slice(0, maxLen);
+      out.push(`      ${snip}${r.snippet.length > maxLen ? " [...已截断]" : ""}`);
     }
     out.push("");
   });
@@ -149,7 +150,7 @@ const SEARCH_CACHE_MAX = 50;
 
 // ── 联网搜索 (多引擎) ──
 registry.register(
-  "联网搜索网页 — 返回标题、URL 和摘要。先看摘要是否已包含答案，够用就不必 web_fetch。\n"
+  "联网搜索网页 — 返回标题、URL 和富内容（前2条自动抓取页面正文）。多数情况搜索结果已包含足够信息，无需再 web_fetch。\n"
     + "参数:\n"
     + "  query           搜索关键词 (必填)\n"
     + "  allowed_domains 限定搜索域名，逗号分隔 (可选，如 'github.com,stackoverflow.com')\n"
@@ -256,7 +257,7 @@ registry.register(
           // URL (cite 标签)
           const cite = block.match(/<cite[^>]*>(.*?)<\/cite>/i);
           const rawUrl = cite ? cite[1].replace(/<[^>]+>/g, '').trim() : "";
-          const url = rawUrl.startsWith('http') ? rawUrl : 'https://' + rawUrl.split('›')[0].trim();
+          const url = rawUrl.startsWith('http') ? rawUrl.split('›')[0].trim().replace(/\s+/g, '') : 'https://' + rawUrl.split('›')[0].trim().replace(/\s+/g, '');
           // 富摘要：提取整个块的纯文本，去掉标题和URL部分
           const fullText = block
             .replace(/<[^>]+>/g, ' ')
@@ -337,6 +338,31 @@ registry.register(
         + `2. 在 settings.json 中配置 web_search.provider 为 brave/serpapi/tavily 并填入 API key\n`
         + `3. 检查网络连接是否正常)`;
     }
+
+    // ── 内容增强: 并行抓取前 2 条结果的页面内容（参考 Continue.dev 做法）──
+    const enrichTopN = Math.min(2, filtered.length);
+    await Promise.allSettled(filtered.slice(0, enrichTopN).map(async (r) => {
+      try {
+        const resp = await fetch(r.url, {
+          signal: AbortSignal.timeout(3000),
+          headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
+        });
+        if (!resp.ok) return;
+        const html = await resp.text();
+        let text = html
+          .replace(/<script[\s\S]*?<\/script>/gi, "")
+          .replace(/<style[\s\S]*?<\/style>/gi, "")
+          .replace(/<nav[\s\S]*?<\/nav>/gi, "")
+          .replace(/<footer[\s\S]*?<\/footer>/gi, "")
+          .replace(/<header[\s\S]*?<\/header>/gi, "")
+          .replace(/<[^>]+>/g, " ")
+          .replace(/&amp;/g, "&").replace(/&nbsp;/g, " ").replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+          .replace(/\s+/g, " ").trim();
+        if (text.length > 100) {
+          r.snippet = text.slice(0, 1500);
+        }
+      } catch { /* 抓取失败不影响搜索结果 */ }
+    }));
 
     const output = formatSearchResults(query, engineUsed, filtered);
 
