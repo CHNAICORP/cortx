@@ -322,7 +322,12 @@ DEFAULT_SYSTEM = (
     "适用场景：大规模代码分析（拆分为多个子任务并行）、多维度审查（安全/性能/测试分别由不同子代理检查）、\n"
     "独立研究任务（避免大量中间结果占用主上下文）。复杂任务优先考虑用 spawn_subagents 并行拆分。\n\n"
     "主动派遣时机：任务涉及 3+ 个独立模块分析、需要多维度审查（安全+性能+测试）、或用户要求「全面/多维度」分析时，\n"
-    "主动用 spawn_subagents 并行拆分。单文件简单审查则直接做，不必派遣。"
+    "主动用 spawn_subagents 并行拆分。单文件简单审查则直接做，不必派遣。\n\n"
+    "== MCP 服务器（预配置）==\n"
+    "你预装了以下 MCP 服务器，通过 mcp_session_start 启动持久化会话即可使用其工具方法：\n"
+    '  - chrome-devtools: 浏览器自动化（导航/截图/点击/填表/性能分析）— mcp_session_start(session_id="cd", server_command="npx", server_args="-y chrome-devtools-mcp@latest")\n'
+    '  - cua-driver: 桌面控制（截图/点击/键盘/应用管理/窗口控制）— mcp_session_start(session_id="cua", server_command="cua-driver", server_args="mcp")\n'
+    "用 mcp_list_servers() 查看所有已配置服务器，mcp_session_call() 调用具体工具方法。"
 )
 
 class ContextGovernor:

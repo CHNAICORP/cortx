@@ -249,7 +249,9 @@ registry.register(
         for (const [key, info] of toInstall) {
           if (!data.mcpServers[key]) {
             if (info.install.length > 0) {
-              data.mcpServers[key] = { command: info.install[0], args: info.install.slice(1), description: info.desc };
+              const cmd = info.startCommand || info.install[0];
+              const args = info.startArgs || info.install.slice(1);
+              data.mcpServers[key] = { command: cmd, args, description: info.desc };
             } else if (info.url) {
               data.mcpServers[key] = { url: info.url, description: info.desc };
             }

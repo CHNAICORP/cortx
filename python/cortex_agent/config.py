@@ -278,6 +278,16 @@ def create_default_settings(path: str) -> dict:
         # ── Memory 注入控制 ──
         "memory_inject_count": 30,
         "mcpServers": {
+            "chrome-devtools": {
+                "command": "npx",
+                "args": ["-y", "chrome-devtools-mcp@latest"],
+                "description": "Chrome DevTools — 浏览器导航/截图/DOM/性能分析"
+            },
+            "cua-driver": {
+                "command": "cua-driver",
+                "args": ["mcp"],
+                "description": "桌面控制 — 截图/点击/键盘/拖拽/滚动/应用管理"
+            },
             "fetch": {
                 "command": "python",
                 "args": ["-m", "mcp_server_fetch"],

@@ -293,6 +293,10 @@ async function main(): Promise<void> {
       input_warn_pct: 80, input_force_pct: 90, compact_input_pct: 85, compact_keep_recent: 12,
       max_result_chars: 50000, memory_inject_count: 30,
       auto_extract_memory: true, memory_enabled: true, sessions_enabled: true,
+      mcpServers: {
+        "chrome-devtools": { command: "npx", args: ["-y", "chrome-devtools-mcp@latest"], description: "Chrome DevTools — 浏览器导航/截图/DOM/性能分析" },
+        "cua-driver": { command: "cua-driver", args: ["mcp"], description: "桌面控制 — 截图/点击/键盘/拖拽/滚动/应用管理" },
+      },
     };
     fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
     fs.writeFileSync(cfgPath, JSON.stringify(template, null, 2), "utf-8");
@@ -399,6 +403,10 @@ async function main(): Promise<void> {
       input_warn_pct: 80, input_force_pct: 90, compact_input_pct: 85, compact_keep_recent: 12,
       max_result_chars: 50000, memory_inject_count: 30,
       auto_extract_memory: true, memory_enabled: true, sessions_enabled: true,
+      mcpServers: {
+        "chrome-devtools": { command: "npx", args: ["-y", "chrome-devtools-mcp@latest"], description: "Chrome DevTools — 浏览器导航/截图/DOM/性能分析" },
+        "cua-driver": { command: "cua-driver", args: ["mcp"], description: "桌面控制 — 截图/点击/键盘/拖拽/滚动/应用管理" },
+      },
     };
     fs.mkdirSync(path.dirname(userPath), { recursive: true });
     fs.writeFileSync(userPath, JSON.stringify(newSettings, null, 2), "utf-8");

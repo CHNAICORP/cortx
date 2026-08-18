@@ -111,11 +111,15 @@ export function loadSettings(): Settings {
         timeout: 10,
       },
       max_steps: 0, context_limit: 0, max_tokens: 0, max_input_tokens: 0, permission_mode: "standard",
-      max_rounds: 0, checkpoint_interval: 5, retry_max: 5, retry_base_delay: 2, compact_threshold: 60,
+      max_rounds: 0, checkpoint_interval: 5, retry_max: 5, retry_base_delay: 2,
       compress_threshold: 6000, compress_head: 2400, compress_tail: 1600, safety_margin: 4096,
       input_warn_pct: 80, input_force_pct: 90, compact_input_pct: 85, compact_keep_recent: 12,
       max_result_chars: 50000, memory_inject_count: 30,
       auto_extract_memory: true, memory_enabled: true, sessions_enabled: true,
+      mcpServers: {
+        "chrome-devtools": { command: "npx", args: ["-y", "chrome-devtools-mcp@latest"], description: "Chrome DevTools — 浏览器导航/截图/DOM/性能分析" },
+        "cua-driver": { command: "cua-driver", args: ["mcp"], description: "桌面控制 — 截图/点击/键盘/拖拽/滚动/应用管理" },
+      },
     };
     fs.mkdirSync(path.dirname(user), { recursive: true });
     fs.writeFileSync(user, JSON.stringify(template, null, 2), "utf-8");

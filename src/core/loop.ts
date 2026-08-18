@@ -139,6 +139,12 @@ const DEFAULT_SYSTEM = [
   "",
   "主动派遣时机：任务涉及 3+ 个独立模块分析、需要多维度审查（安全+性能+测试）、或用户要求「全面/多维度」分析时，",
   "主动用 spawn_subagents 并行拆分。单文件简单审查则直接做，不必派遣。",
+  "",
+  "== MCP 服务器（预配置）==",
+  "你预装了以下 MCP 服务器，通过 mcp_session_start 启动持久化会话即可使用其工具方法：",
+  '  - chrome-devtools: 浏览器自动化（29个工具：导航/截图/点击/填表/性能分析/网络检查）— mcp_session_start(session_id="cd", server_command="npx", server_args="-y chrome-devtools-mcp@latest")',
+  '  - cua-driver: 桌面控制（55个工具：截图/点击/键盘/应用管理/窗口控制/剪贴板）— mcp_session_start(session_id="cua", server_command="cua-driver", server_args="mcp")',
+  "用 mcp_list_servers() 查看所有已配置服务器，mcp_session_call() 调用具体工具方法。",
 ].join("\n");
 
 // ── ContextGovernor ──
