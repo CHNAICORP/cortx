@@ -52,15 +52,18 @@ function resolveCommand(cmd: string[]): string[] {
 // ── MCP JSON-RPC exchange ──
 export function mcpExchange(serverCmd: string[], requests: string[], timeout = 90000): Promise<any[]> {
   return new Promise((resolve, reject) => {
-    const resolvedCmd = resolveCommand([...serverCmd]);
+    // shell 模式下让 shell 自己解析 PATH（避免完整路径中的空格问题）
+    const useShell = process.platform === "win32";
+    const resolvedCmd = useShell ? [...serverCmd] : resolveCommand([...serverCmd]);
     const proc = spawn(resolvedCmd[0], resolvedCmd.slice(1), {
       stdio: ["pipe", "pipe", "pipe"],
-      shell: process.platform === "win32",  // Windows 需要 shell 模式来解析 .cmd 文件
+      shell: useShell,
     });
     const responses: any[] = [];
     const lineBuffer: string[] = [];
     let resolved = false;
     let currentRequestIdx = 0;
+    let stderrBuf = "";
 
     const timer = setTimeout(() => {
       if (!resolved) {
@@ -106,13 +109,23 @@ export function mcpExchange(serverCmd: string[], requests: string[], timeout = 9
       }
     });
 
-    proc.stderr.on("data", () => { /* 吞掉 stderr 防止死锁 */ });
+    // 捕获 stderr 用于错误诊断 + 检测服务器就绪
+    let firstRequestSent = false;
+    const sendFirst = () => {
+      if (firstRequestSent) return;
+      firstRequestSent = true;
+      sendNextRequest();
+    };
+    proc.stderr.on("data", (data: Buffer) => {
+      stderrBuf += data.toString();
+      sendFirst(); // stderr 输出 = 服务器已启动，立即发送请求
+    });
 
     function sendNextRequest() {
-      currentRequestIdx++;
       while (currentRequestIdx < requests.length) {
         const req = requests[currentRequestIdx];
-        proc.stdin.write(req + "\n");
+        currentRequestIdx++;
+        try { proc.stdin.write(req + "\n"); } catch { /* stdin closed */ }
         try {
           const parsed = JSON.parse(req);
           if ("id" in parsed) {
@@ -120,14 +133,16 @@ export function mcpExchange(serverCmd: string[], requests: string[], timeout = 9
             return;
           }
           // 通知（无 id），继续发送下一个
-          currentRequestIdx++;
         } catch {
-          currentRequestIdx++;
+          // 非 JSON，继续
         }
       }
       // 所有请求已发送，关闭 stdin
       try { proc.stdin.end(); } catch { /* already closed */ }
     }
+
+    // 发送第一个请求：等 stderr 就绪信号，或 10 秒兜底
+    setTimeout(sendFirst, 10000);
 
     // 发送第一个请求
     if (requests.length > 0) {
@@ -208,7 +223,7 @@ registry.register(
       for (const msg of responses) {
         if (msg.result && msg.result.tools) tools = msg.result.tools;
       }
-      if (!tools.length) return `(x) 服务器未返回工具列表 (收到 ${responses.length} 条响应)`;
+      if (!tools.length) return `(x) 服务器未返回工具列表 (收到 ${responses.length} 条响应)\n可能原因: npx 正在下载包(需等待)、包名错误、或网络问题。\n请检查 serverCommand 和 serverArgs 是否正确。`;
       const out = [`来自 ${serverCommand} 的 ${tools.length} 个工具:\n`];
       for (const t of tools) {
         out.push(`  ● ${t.name || "?"}: ${(t.description || "").slice(0, 80)}`);
@@ -398,7 +413,7 @@ registry.register(
       _sessions.delete(sid);
     }
     const cmdArgs = sargs ? sargs.split(/\s+/).filter(Boolean) : [];
-    const proc = spawn(cmd, cmdArgs, { stdio: ["pipe", "pipe", "pipe"] });
+    const proc = spawn(cmd, cmdArgs, { stdio: ["pipe", "pipe", "pipe"], shell: process.platform === "win32" });
     const session: McpSession = { proc, toolsCache: "", nextId: 1, pending: new Map(), buffer: "" };
     try {
       await _initSession(session);
