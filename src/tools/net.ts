@@ -18,16 +18,6 @@ import { checkSsrf } from '../core/policy.js';
 import * as https from "node:https";
 import * as http from "node:http";
 
-// ── 全局代理设置：让 fetch() 也走代理（undici ProxyAgent）──
-// Node.js 内置 fetch() 不自动读取 HTTPS_PROXY，需要用 undici ProxyAgent
-try {
-  const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy;
-  if (proxyUrl) {
-    const { ProxyAgent, setGlobalDispatcher } = require("undici");
-    setGlobalDispatcher(new ProxyAgent(proxyUrl));
-  }
-} catch { /* undici 不可用时静默回退 */ }
-
 async function httpRequest(url: string, method = 'GET', body?: string, timeout = 10000, extraHeaders: Record<string, string> = {}, maxRedirects = 5): Promise<string> {
   const reqUrl = new URL(url);
   // SSRF check via policy engine (includes DNS resolution + CIDR matching)
@@ -243,7 +233,45 @@ registry.register(
       } catch { /* fall through */ }
     }
 
-    // ── DuckDuckGo Instant Answer API (JSON — 最快) ──
+    // ── Bing CN (国内国际通用，0.3s 极快，用 fetch 避免代理干扰) ──
+    if (!rawResults.length) {
+      try {
+        const bingUrl = `https://cn.bing.com/search?q=${encoded}&ensearch=1&setlang=en`;
+        const resp = await fetch(bingUrl, {
+          signal: AbortSignal.timeout(5000),
+          headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
+        });
+        const html = await resp.text();
+        // Bing 用 <cite> 标签存储真实 URL，<h2><a> 存标题（但 URL 是 bing.com/ck/a 重定向）
+        const h2Re = /<h2[^>]*>\s*<a[^>]*?>(.*?)<\/a>\s*<\/h2>/gi;
+        const citeRe = /<cite[^>]*>(.*?)<\/cite>/gi;
+        const titles: string[] = [];
+        const urls: string[] = [];
+        let match: RegExpExecArray | null;
+        while ((match = h2Re.exec(html)) !== null) {
+          titles.push(match[1].replace(/<[^>]+>/g, '').trim().replace(/&amp;/g, '&'));
+        }
+        while ((match = citeRe.exec(html)) !== null) {
+          const rawUrl = match[1].replace(/<[^>]+>/g, '').trim();
+          // cite 里的 URL 可能是 "site.com › path › page" 格式，取域名部分
+          const cleanUrl = rawUrl.startsWith('http') ? rawUrl : 'https://' + rawUrl.split('›')[0].trim();
+          urls.push(cleanUrl);
+        }
+        // 配对标题和 URL
+        for (let i = 0; i < Math.min(titles.length, urls.length); i++) {
+          if (titles[i] && urls[i]) {
+            // 查找 snippet：在 cite 标签后搜索 <p>
+            const citeEnd = html.indexOf('</cite>', html.indexOf('<cite', 0) + i * 100);
+            const snippetM = /<p[^>]*>(.*?)<\/p>/i.exec(html.slice(citeEnd > 0 ? citeEnd : 0, (citeEnd > 0 ? citeEnd : 0) + 2000));
+            const snippet = snippetM ? snippetM[1].replace(/<[^>]+>/g, '').trim().replace(/&ensp;/g, ' ').replace(/&#0183;/g, ' • ').replace(/&amp;/g, '&') : '';
+            rawResults.push({ title: titles[i], url: urls[i], snippet });
+          }
+        }
+        engineUsed = "Bing";
+      } catch { /* fall through */ }
+    }
+
+    // ── DuckDuckGo Instant Answer API (JSON — 备用，需代理) ──
     if (!rawResults.length) {
       try {
         const html = await httpRequest(
@@ -290,25 +318,6 @@ registry.register(
         }
         engineUsed = "DuckDuckGo Lite";
       } catch { /* fall through */ }
-    }
-
-    // ── Bing Web Search (HTML scraping — final fallback) ──
-    if (!rawResults.length) {
-      try {
-        const bingUrl = `https://cn.bing.com/search?q=${encoded}&setlang=zh-cn`;
-        const html = await httpRequest(bingUrl, 'GET', undefined, timeout);
-        const h2Re = /<h2[^>]*>\s*<a[^>]*?href=["']([^"']+)["'][^>]*?>(.*?)<\/a>\s*<\/h2>/gi;
-        let match: RegExpExecArray | null;
-        while ((match = h2Re.exec(html)) !== null) {
-          const u = match[1], title = match[2].replace(/<[^>]+>/g, '').trim().replace(/&amp;/g, '&');
-          if (!title || u.includes('bing.com')) continue;
-          const restIdx = match.index + match[0].length;
-          const snippetM = /<p[^>]*>(.*?)<\/p>/i.exec(html.slice(restIdx, restIdx + 2000));
-          const snippet = snippetM ? snippetM[1].replace(/<[^>]+>/g, '').trim().replace(/&ensp;/g, ' ').replace(/&#0183;/g, ' • ') : '';
-          rawResults.push({ title, url: u, snippet });
-        }
-        engineUsed = "Bing";
-      } catch { /* all search strategies failed */ }
     }
 
     // ── 后处理: 域名过滤 + 去重 + 截断 ──
@@ -433,22 +442,7 @@ registry.register(
       return cached[1] + "\n[缓存命中]";
     }
 
-    // ── 策略 1: Jina Reader（快速、干净 Markdown，处理 JS 渲染）──
-    const jinaText = await jinaReader(url, 8000);
-    if (jinaText && jinaText.length > 100) {
-      let text = jinaText;
-      if (text.length > limit) {
-        const keepHead = Math.floor(limit * 0.8);
-        const keepTail = Math.floor(limit * 0.15);
-        text = text.slice(0, keepHead) + `\n\n[... 已截断，原文 ${text.length} 字符 ...]\n\n` + text.slice(-keepTail);
-      }
-      const result = `--- ${url} ---\n\n${text}`;
-      if (_fetchCache.size >= FETCH_CACHE_MAX) _fetchCache.clear();
-      _fetchCache.set(cacheKey, [Date.now(), result]);
-      return result;
-    }
-
-    // ── 策略 2: 原始 HTTP + HTML 解析（回退）──
+    // ── 策略 1: 原始 HTTP + HTML 解析（默认，无需外部服务）──
     try {
       const html = await httpRequest(url, 'GET', undefined, 10000);
       const ct = html.startsWith("{") ? "application/json" : "text/html";
@@ -468,7 +462,21 @@ registry.register(
         header = `--- ${url} ---\n[Content-Type: ${ct}]\n\n`;
       }
 
-      if (!text.trim()) return `--- ${url} ---\n(无有效文本)`;
+      if (!text.trim()) {
+        // HTML 解析无结果，尝试 Jina Reader
+        const jinaText = await jinaReader(url, 8000);
+        if (jinaText && jinaText.length > 100) {
+          let jt = jinaText;
+          if (jt.length > limit) {
+            jt = jt.slice(0, Math.floor(limit * 0.8)) + `\n\n[... 已截断 ...]\n\n` + jt.slice(-Math.floor(limit * 0.15));
+          }
+          const result = `--- ${url} ---\n\n${jt}`;
+          if (_fetchCache.size >= FETCH_CACHE_MAX) _fetchCache.clear();
+          _fetchCache.set(cacheKey, [Date.now(), result]);
+          return result;
+        }
+        return `--- ${url} ---\n(无有效文本)`;
+      }
 
       if (text.length > limit) {
         const keepHead = Math.floor(limit * 0.8);
@@ -480,8 +488,22 @@ registry.register(
       if (_fetchCache.size >= FETCH_CACHE_MAX) _fetchCache.clear();
       _fetchCache.set(cacheKey, [Date.now(), result]);
       return result;
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
+    } catch (httpErr: unknown) {
+      // ── 策略 2: Jina Reader（HTTP 失败时的备用方案，需可访问 r.jina.ai）──
+      const jinaText = await jinaReader(url, 8000);
+      if (jinaText && jinaText.length > 100) {
+        let text = jinaText;
+        if (text.length > limit) {
+          const keepHead = Math.floor(limit * 0.8);
+          const keepTail = Math.floor(limit * 0.15);
+          text = text.slice(0, keepHead) + `\n\n[... 已截断，原文 ${text.length} 字符 ...]\n\n` + text.slice(-keepTail);
+        }
+        const result = `--- ${url} ---\n\n${text}`;
+        if (_fetchCache.size >= FETCH_CACHE_MAX) _fetchCache.clear();
+        _fetchCache.set(cacheKey, [Date.now(), result]);
+        return result;
+      }
+      const msg = httpErr instanceof Error ? httpErr.message : String(httpErr);
       return `(x) 抓取失败: ${msg} — ${url}`;
     }
   },

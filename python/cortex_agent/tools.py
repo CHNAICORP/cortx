@@ -761,7 +761,40 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
         except Exception:
             pass
 
-    # ── DuckDuckGo Instant Answer API (JSON — 最快) ──
+    # ── Bing CN (国内国际通用，0.3s 极快) ──
+    if not raw_results:
+        try:
+            bing_url = f"https://cn.bing.com/search?q={encoded}&ensearch=1&setlang=en"
+            req = urllib.request.Request(bing_url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            })
+            with opener.open(req, timeout=5) as r:
+                html = r.read().decode("utf-8", errors="ignore")
+            # Bing 用 <cite> 存真实 URL，<h2><a> 存标题
+            h2_re = re.compile(r'<h2[^>]*>\s*<a[^>]*?>(.*?)</a>\s*</h2>', re.IGNORECASE)
+            cite_re = re.compile(r'<cite[^>]*>(.*?)</cite>', re.IGNORECASE)
+            titles = []
+            for m in h2_re.finditer(html):
+                t = re.sub(r'<[^>]+>', '', m.group(1)).strip().replace('&amp;', '&')
+                if t:
+                    titles.append(t)
+            urls = []
+            for m in cite_re.finditer(html):
+                raw_url = re.sub(r'<[^>]+>', '', m.group(1)).strip()
+                if raw_url.startswith('http'):
+                    urls.append(raw_url)
+                else:
+                    # "site.com › path" 格式
+                    domain = raw_url.split('›')[0].strip()
+                    urls.append('https://' + domain)
+            for i in range(min(len(titles), len(urls))):
+                if titles[i] and urls[i]:
+                    raw_results.append({"title": titles[i], "url": urls[i], "snippet": ""})
+            engine_used = "Bing"
+        except Exception:
+            pass
+
+    # ── DuckDuckGo Instant Answer API (JSON — 备用，需代理) ──
     if not raw_results:
         try:
             api_url = f"https://api.duckduckgo.com/?q={encoded}&format=json&no_html=1&skip_disambig=1"
@@ -824,30 +857,6 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
                         continue
                     raw_results.append({"title": title, "url": u, "snippet": ""})
             engine_used = "DuckDuckGo Lite"
-        except Exception:
-            pass
-
-    # ── Bing Web Search (HTML scraping — final fallback) ──
-    if not raw_results:
-        try:
-            bing_url = f"https://cn.bing.com/search?q={encoded}&setlang=zh-cn"
-            req = urllib.request.Request(bing_url, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept": "text/html",
-                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            })
-            with opener.open(req, timeout=10) as r:
-                bing_html = r.read().decode("utf-8", errors="ignore")
-            for m in re.finditer(r'<h2[^>]*>\s*<a[^>]*?href=["\']([^"\']+)["\'][^>]*?>(.*?)</a>', bing_html, re.S|re.I):
-                b_url = m.group(1)
-                b_title = re.sub(r'<[^>]+>', '', m.group(2)).strip()
-                if not b_title or 'bing.com' in b_url:
-                    continue
-                rest = bing_html[m.end():m.end()+2000]
-                sm = re.search(r'<p[^>]*>(.*?)</p>', rest, re.S|re.I)
-                b_snippet = re.sub(r'<[^>]+>', '', sm.group(1)).strip() if sm else ''
-                raw_results.append({"title": b_title, "url": b_url, "snippet": b_snippet})
-            engine_used = "Bing"
         except Exception:
             pass
 
