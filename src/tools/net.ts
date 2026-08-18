@@ -18,6 +18,16 @@ import { checkSsrf } from '../core/policy.js';
 import * as https from "node:https";
 import * as http from "node:http";
 
+// ── 全局代理设置：让 fetch() 也走代理（undici ProxyAgent）──
+// Node.js 内置 fetch() 不自动读取 HTTPS_PROXY，需要用 undici ProxyAgent
+try {
+  const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy;
+  if (proxyUrl) {
+    const { ProxyAgent, setGlobalDispatcher } = require("undici");
+    setGlobalDispatcher(new ProxyAgent(proxyUrl));
+  }
+} catch { /* undici 不可用时静默回退 */ }
+
 async function httpRequest(url: string, method = 'GET', body?: string, timeout = 10000, extraHeaders: Record<string, string> = {}, maxRedirects = 5): Promise<string> {
   const reqUrl = new URL(url);
   // SSRF check via policy engine (includes DNS resolution + CIDR matching)

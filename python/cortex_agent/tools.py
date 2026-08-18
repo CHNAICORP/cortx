@@ -937,6 +937,12 @@ def web_fetch(work_dir: str, url: str, max_chars: int = 0) -> str:
     if not ok:
         return f"(x) {reason}"
 
+    # ── 易超时域名警告 ──
+    _SLOW_DOMAINS = ["news.google.com", "duckduckgo.com", "lite.duckduckgo.com",
+                     "html.duckduckgo.com", "google.com/search", "bing.com/search"]
+    if any(d in url for d in _SLOW_DOMAINS):
+        return f"(⚠️) {url} 是已知的慢速域名，抓取可能超时。建议从搜索结果中选择其他来源。"
+
     limit = min(int(max_chars) if max_chars and int(max_chars) > 0 else 8000, 20000)
 
     # ── 检查缓存 ──
@@ -947,6 +953,32 @@ def web_fetch(work_dir: str, url: str, max_chars: int = 0) -> str:
         if _time.time() - cached_time < _FETCH_CACHE_TTL:
             return cached_text + "\n[缓存命中]"
 
+    # ── 策略 1: Jina Reader（快速、干净 Markdown，处理 JS 渲染）──
+    try:
+        jina_url = f"https://r.jina.ai/{url}"
+        jina_req = urllib.request.Request(jina_url, headers={
+            "User-Agent": "cortex-agent",
+            "Accept": "text/plain",
+        })
+        opener = _build_opener()
+        with opener.open(jina_req, timeout=8) as r:
+            if r.status == 200:
+                jina_text = r.read(204800).decode("utf-8", errors="ignore").strip()
+                if jina_text and len(jina_text) > 100:
+                    text = jina_text
+                    if len(text) > limit:
+                        keep_head = int(limit * 0.8)
+                        keep_tail = int(limit * 0.15)
+                        text = text[:keep_head] + f"\n\n[... 已截断，原文 {len(text)} 字符 ...]\n\n" + text[-keep_tail:]
+                    result = f"--- {url} ---\n\n{text}"
+                    if len(_fetch_cache) >= _FETCH_CACHE_MAX:
+                        _fetch_cache.clear()
+                    _fetch_cache[cache_key] = (_time.time(), result)
+                    return result
+    except Exception:
+        pass  # Jina 失败，回退到原始 HTTP
+
+    # ── 策略 2: 原始 HTTP + HTML 解析（回退）──
     opener = _build_opener()
     try:
         req = urllib.request.Request(url, headers={
