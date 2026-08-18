@@ -217,6 +217,145 @@ def _fmt_time(iso: str) -> str:
         return str(iso)[:16]
 
 
+# ══════════════════════════════════════════════════════════════
+# / 和 @ 自动补全输入（实时下拉提示）
+# ══════════════════════════════════════════════════════════════
+
+_SLASH_CMDS = [
+    ("/help", "显示帮助"), ("/tools", "列出工具"), ("/skills", "列出技能"),
+    ("/skill", "调用技能 <name>"), ("/model", "切换模型"), ("/mode", "切换权限"),
+    ("/context", "上下文容量+缓存"), ("/memory", "查看记忆"), ("/forget", "删除记忆"),
+    ("/save", "保存会话"), ("/sessions", "列出会话"), ("/resume", "恢复会话"),
+    ("/reset", "重置上下文"), ("/trace", "最后轨迹"), ("/audit", "审计轨迹"),
+    ("/kb", "查看知识库"), ("/init", "初始化项目"), ("/goal", "设置目标"),
+    ("/plan", "规划模式"), ("/hooks", "钩子管理"), ("/exit", "退出"),
+]
+
+
+def _read_input_hints(prompt: str, work_dir: str, term) -> str:
+    """读取用户输入，输入 / 或 @ 时实时显示补全提示。回退到 input() 如果 raw 模式不可用。"""
+    # 检测 raw 模式可用性
+    try:
+        import msvcrt  # noqa
+        _plat = "win"
+    except ImportError:
+        try:
+            import termios  # noqa
+            _plat = "unix"
+        except ImportError:
+            _plat = "none"
+
+    if _plat == "none":
+        return input(prompt)
+
+    buf = ""
+    _hint_n = [0]  # nonlocal workaround
+
+    def _clear_hint():
+        if _hint_n[0] > 0:
+            for _ in range(_hint_n[0]):
+                sys.stdout.write("\x1b[B\x1b[2K")
+            for _ in range(_hint_n[0]):
+                sys.stdout.write("\x1b[A")
+            sys.stdout.flush()
+            _hint_n[0] = 0
+
+    def _render_hint():
+        _clear_hint()
+        hints = []
+        if buf.startswith("/"):
+            for cmd, desc in _SLASH_CMDS:
+                if cmd.startswith(buf.rstrip()) or (len(buf) > 1 and cmd.startswith(buf)):
+                    hints.append(f"  {term.CYAN}{cmd}{term.RESET} {term.GRAY}{desc}{term.RESET}")
+        elif "@" in buf:
+            at_idx = buf.rfind("@")
+            prefix = buf[at_idx + 1:]
+            try:
+                files = [f for f in os.listdir(work_dir)
+                         if f.startswith(prefix) and not f.startswith(".")]
+                hints = [f"  {term.YELLOW}@{f}{term.RESET}" for f in files[:7]]
+            except Exception:
+                pass
+        if hints:
+            sys.stdout.write("\x1b[s\n" + "\n".join(hints[:7]) + "\x1b[u")
+            sys.stdout.flush()
+            _hint_n[0] = min(len(hints), 7) + 1
+
+    def _read_one():
+        """读取一个按键，返回 (char, key_name)。"""
+        if _plat == "win":
+            import msvcrt
+            ch = msvcrt.getwch()
+            if ch in ("\x00", "\xe0"):
+                ch2 = msvcrt.getwch()
+                kn = {"H": "up", "P": "down"}.get(ch2, "")
+                return "", kn
+            return ch, {"\r": "return", "\n": "return", "\x03": "cancel"}.get(ch, "")
+        else:
+            import termios, tty
+            fd = sys.stdin.fileno()
+            old = termios.tcgetattr(fd)
+            try:
+                tty.setcbreak(fd)
+                ch = sys.stdin.read(1)
+                if ch == "\x1b":
+                    rest = sys.stdin.read(2)
+                    kn = {"[A": "up", "[B": "down"}.get(rest, "")
+                    return "", kn
+                return ch, {"\r": "return", "\n": "return", "\x03": "cancel"}.get(ch, "")
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+
+    while True:
+        ch, key = _read_one()
+
+        if key == "return":
+            _clear_hint()
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            return buf
+        elif key == "cancel":
+            _clear_hint()
+            sys.stdout.write("\n")
+            raise KeyboardInterrupt
+        elif ch in ("\x08", "\x7f"):  # Backspace
+            if buf:
+                buf = buf[:-1]
+                sys.stdout.write("\b \b")
+                sys.stdout.flush()
+                _render_hint()
+        elif ch == "\t":  # Tab: 补全第一个匹配
+            if buf.startswith("/"):
+                matches = [c for c, _ in _SLASH_CMDS if c.startswith(buf)]
+                if matches:
+                    old_len = len(buf)
+                    buf = matches[0] + " "
+                    sys.stdout.write("\b" * old_len + " " * old_len + "\b" * old_len + buf)
+                    sys.stdout.flush()
+                    _render_hint()
+            elif "@" in buf:
+                at_idx = buf.rfind("@")
+                prefix = buf[at_idx + 1:]
+                try:
+                    files = [f for f in os.listdir(work_dir) if f.startswith(prefix)]
+                    if files:
+                        old_len = len(buf)
+                        buf = buf[:at_idx + 1] + files[0]
+                        sys.stdout.write("\b" * old_len + " " * old_len + "\b" * old_len + buf)
+                        sys.stdout.flush()
+                        _render_hint()
+                except Exception:
+                    pass
+        elif ch and ch.isprintable():
+            buf += ch
+            sys.stdout.write(ch)
+            sys.stdout.flush()
+            _render_hint()
+
+
 def _read_key() -> str:
     """
     跨平台读取单按键，返回 key name。
@@ -588,7 +727,7 @@ def main():
             hr = cs["hit_rate"]
             hc = term.GREEN if hr > 80 else (term.YELLOW if hr > 50 else term.RED)
             cache_str = f" {hc}⚡{hr:.0f}%{term.RESET}"
-        try: q = input(f"\n{mode_label} {ctx_color}{ctx_pct}%{term.RESET}{cache_str}> ").strip()
+        try: q = _read_input_hints(f"\n{mode_label} {ctx_color}{ctx_pct}%{term.RESET}{cache_str}> ", work_dir, term).strip()
         except (EOFError, KeyboardInterrupt):
             agent.save_session()
             sid = agent.session_id or "?"
