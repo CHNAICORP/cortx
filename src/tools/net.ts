@@ -134,7 +134,10 @@ function formatSearchResults(query: string, engine: string, results: SearchItem[
   results.forEach((r, i) => {
     out.push(`  [${i + 1}] ${r.title.slice(0, 120)}`);
     out.push(`      🔗 ${r.url}`);
-    if (r.snippet) out.push(`      ${r.snippet.slice(0, 600)}`);
+    if (r.snippet) {
+      const snip = r.snippet.slice(0, 600);
+      out.push(`      ${snip}${r.snippet.length > 600 ? " [...]" : ""}`);
+    }
     out.push("");
   });
   return out.join("\n");
@@ -182,37 +185,7 @@ registry.register(
     let rawResults: SearchItem[] = [];
     let engineUsed = "";
 
-    // ── Firecrawl Search（优先引擎，免费 keyless，限速时回退）──
-    if (!rawResults.length) {
-      try {
-        const fcResp = await fetch("https://api.firecrawl.dev/v1/search", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            query,
-            limit: n,
-            ...(allowed ? { includeDomains: allowed } : {}),
-          }),
-          signal: AbortSignal.timeout(8000),
-        });
-        if (fcResp.ok) {
-          const fcData = await fcResp.json() as { data?: Array<{ url?: string; title?: string; description?: string }> };
-          for (const item of (fcData.data || [])) {
-            if (item.url && item.title) {
-              rawResults.push({
-                title: item.title,
-                url: item.url,
-                snippet: item.description || "",
-              });
-            }
-          }
-          if (rawResults.length) engineUsed = "Firecrawl";
-        }
-        // 429 限速时不报错，静默回退到 Bing
-      } catch { /* fall through */ }
-    }
-
-    // ── Brave Search API ──
+    // ── Brave Search API（用户配了 key 才用）──
     if (provider === "brave" && wsCfg.brave_api_key) {
       try {
         const apiUrl = `https://api.search.brave.com/res/v1/web/search?q=${encoded}&count=${n * 2}`;
@@ -272,29 +245,32 @@ registry.register(
           headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         });
         const html = await resp.text();
-        // Bing 用 <cite> 标签存储真实 URL，<h2><a> 存标题（但 URL 是 bing.com/ck/a 重定向）
-        const h2Re = /<h2[^>]*>\s*<a[^>]*?>(.*?)<\/a>\s*<\/h2>/gi;
-        const citeRe = /<cite[^>]*>(.*?)<\/cite>/gi;
-        const titles: string[] = [];
-        const urls: string[] = [];
-        let match: RegExpExecArray | null;
-        while ((match = h2Re.exec(html)) !== null) {
-          titles.push(match[1].replace(/<[^>]+>/g, '').trim().replace(/&amp;/g, '&'));
-        }
-        while ((match = citeRe.exec(html)) !== null) {
-          const rawUrl = match[1].replace(/<[^>]+>/g, '').trim();
-          // cite 里的 URL 可能是 "site.com › path › page" 格式，取域名部分
-          const cleanUrl = rawUrl.startsWith('http') ? rawUrl : 'https://' + rawUrl.split('›')[0].trim();
-          urls.push(cleanUrl);
-        }
-        // 配对标题和 URL
-        for (let i = 0; i < Math.min(titles.length, urls.length); i++) {
-          if (titles[i] && urls[i]) {
-            // 查找 snippet：在 cite 标签后搜索 <p>
-            const citeEnd = html.indexOf('</cite>', html.indexOf('<cite', 0) + i * 100);
-            const snippetM = /<p[^>]*>(.*?)<\/p>/i.exec(html.slice(citeEnd > 0 ? citeEnd : 0, (citeEnd > 0 ? citeEnd : 0) + 2000));
-            const snippet = snippetM ? snippetM[1].replace(/<[^>]+>/g, '').trim().replace(/&ensp;/g, ' ').replace(/&#0183;/g, ' • ').replace(/&amp;/g, '&') : '';
-            rawResults.push({ title: titles[i], url: urls[i], snippet });
+        // 提取完整 b_algo 块（包含标题+URL+所有文本内容，非仅 <p> 段落）
+        const blockRe = /<li[^>]*class="b_algo"[^>]*>([\s\S]*?)<\/li>/gi;
+        let blockMatch: RegExpExecArray | null;
+        while ((blockMatch = blockRe.exec(html)) !== null && rawResults.length < n) {
+          const block = blockMatch[1];
+          // 标题
+          const h2 = block.match(/<h2[^>]*><a[^>]*>(.*?)<\/a>/i);
+          const title = h2 ? h2[1].replace(/<[^>]+>/g, '').trim().replace(/&amp;/g, '&') : "";
+          // URL (cite 标签)
+          const cite = block.match(/<cite[^>]*>(.*?)<\/cite>/i);
+          const rawUrl = cite ? cite[1].replace(/<[^>]+>/g, '').trim() : "";
+          const url = rawUrl.startsWith('http') ? rawUrl : 'https://' + rawUrl.split('›')[0].trim();
+          // 富摘要：提取整个块的纯文本，去掉标题和URL部分
+          const fullText = block
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/&ensp;/g, ' ').replace(/&#0183;/g, ' • ').replace(/&amp;/g, '&')
+            .replace(/&nbsp;/g, ' ').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+            .replace(/\s+/g, ' ').trim();
+          // 去掉标题和URL前缀，保留摘要正文
+          let snippet = fullText;
+          if (title) snippet = snippet.replace(title, '').trim();
+          if (rawUrl) snippet = snippet.replace(rawUrl, '').trim();
+          // 截断到 600 字
+          if (snippet.length > 600) snippet = snippet.slice(0, 600) + ' [...]';
+          if (title && url) {
+            rawResults.push({ title, url, snippet });
           }
         }
         engineUsed = "Bing";
@@ -472,60 +448,10 @@ registry.register(
       return cached[1] + "\n[缓存命中]";
     }
 
-    // ── 策略 0: Firecrawl Scrape（优先，干净 Markdown，限速时回退）──
-    // 对 GitHub 等国内不稳定域名特别有效（Firecrawl 云端代理访问）
+    // ── 策略 1: 原始 HTTP + HTML 解析（默认，无需外部服务）──
     const isBlockedDomain = isSlowDomain(url) || url.includes("github.com") || url.includes("huggingface.co");
-    if (true) {
-      try {
-        const fcResp = await fetch("https://api.firecrawl.dev/v1/scrape", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url, formats: ["markdown"] }),
-          signal: AbortSignal.timeout(isBlockedDomain ? 8000 : 5000),
-        });
-        if (fcResp.ok) {
-          const fcData = await fcResp.json() as { data?: { markdown?: string; metadata?: { title?: string } } };
-          const md = fcData.data?.markdown || "";
-          const title = fcData.data?.metadata?.title || "";
-          if (md.length > 100) {
-            let text = md;
-            if (text.length > limit) {
-              const keepHead = Math.floor(limit * 0.8);
-              const keepTail = Math.floor(limit * 0.15);
-              text = text.slice(0, keepHead) + `\n\n[... 已截断，原文 ${text.length} 字符 ...]\n\n` + text.slice(-keepTail);
-            }
-            const header = `--- ${url} ---${title ? `\n标题: ${title}` : ""}\n\n`;
-            const result = header + text;
-            if (_fetchCache.size >= FETCH_CACHE_MAX) _fetchCache.clear();
-            _fetchCache.set(cacheKey, [Date.now(), result]);
-            return result;
-          }
-        }
-        // 429 限速或空结果，静默回退
-      } catch { /* fall through to HTTP */ }
-    }
-
-    // ── 国内不稳定域名：跳过原始 HTTP（必然超时），直接用 Jina Reader ──
-    if (isBlockedDomain) {
-      const jinaText = await jinaReader(url, 8000);
-      if (jinaText && jinaText.length > 100) {
-        let text = jinaText;
-        if (text.length > limit) {
-          const keepHead = Math.floor(limit * 0.8);
-          const keepTail = Math.floor(limit * 0.15);
-          text = text.slice(0, keepHead) + `\n\n[... 已截断，原文 ${text.length} 字符 ...]\n\n` + text.slice(-keepTail);
-        }
-        const result = `--- ${url} ---\n\n${text}`;
-        if (_fetchCache.size >= FETCH_CACHE_MAX) _fetchCache.clear();
-        _fetchCache.set(cacheKey, [Date.now(), result]);
-        return result;
-      }
-      return `(x) 抓取失败: ${url} 是国内不稳定域名（GitHub/HuggingFace 等），Firecrawl 限速且直连超时。建议稍后重试或换用其他来源。`;
-    }
-
-    // ── 策略 1: 原始 HTTP + HTML 解析（回退）──
     try {
-      const html = await httpRequest(url, 'GET', undefined, 10000);
+      const html = await httpRequest(url, 'GET', undefined, 5000);
       const ct = html.startsWith("{") ? "application/json" : "text/html";
 
       let text: string;
@@ -544,18 +470,6 @@ registry.register(
       }
 
       if (!text.trim()) {
-        // HTML 解析无结果，尝试 Jina Reader
-        const jinaText = await jinaReader(url, 8000);
-        if (jinaText && jinaText.length > 100) {
-          let jt = jinaText;
-          if (jt.length > limit) {
-            jt = jt.slice(0, Math.floor(limit * 0.8)) + `\n\n[... 已截断 ...]\n\n` + jt.slice(-Math.floor(limit * 0.15));
-          }
-          const result = `--- ${url} ---\n\n${jt}`;
-          if (_fetchCache.size >= FETCH_CACHE_MAX) _fetchCache.clear();
-          _fetchCache.set(cacheKey, [Date.now(), result]);
-          return result;
-        }
         return `--- ${url} ---\n(无有效文本)`;
       }
 
@@ -570,7 +484,34 @@ registry.register(
       _fetchCache.set(cacheKey, [Date.now(), result]);
       return result;
     } catch (httpErr: unknown) {
-      // ── 策略 2: Jina Reader（HTTP 失败时的备用方案，需可访问 r.jina.ai）──
+      // ── 策略 2: Firecrawl Scrape（HTTP 失败时备用，云端代理访问，干净 Markdown）──
+      try {
+        const fcResp = await fetch("https://api.firecrawl.dev/v1/scrape", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url, formats: ["markdown"] }),
+          signal: AbortSignal.timeout(8000),
+        });
+        if (fcResp.ok) {
+          const fcData = await fcResp.json() as { data?: { markdown?: string; metadata?: { title?: string } } };
+          const md = fcData.data?.markdown || "";
+          const title = fcData.data?.metadata?.title || "";
+          if (md.length > 100) {
+            let text = md;
+            if (text.length > limit) {
+              const keepHead = Math.floor(limit * 0.8);
+              const keepTail = Math.floor(limit * 0.15);
+              text = text.slice(0, keepHead) + `\n\n[... 已截断，原文 ${text.length} 字符 ...]\n\n` + text.slice(-keepTail);
+            }
+            const result = `--- ${url} ---${title ? `\n标题: ${title}` : ""}\n\n${text}`;
+            if (_fetchCache.size >= FETCH_CACHE_MAX) _fetchCache.clear();
+            _fetchCache.set(cacheKey, [Date.now(), result]);
+            return result;
+          }
+        }
+      } catch { /* fall through */ }
+
+      // ── 策略 3: Jina Reader（最终兜底）──
       const jinaText = await jinaReader(url, 8000);
       if (jinaText && jinaText.length > 100) {
         let text = jinaText;

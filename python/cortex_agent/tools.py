@@ -646,7 +646,7 @@ def _format_search_results(query: str, engine: str, results: list) -> str:
     for i, r in enumerate(results, 1):
         title = r.get("title", "")[:120]
         url = r.get("url", "")
-        snippet = r.get("snippet", "")[:400]
+        snippet = r.get("snippet", "")[:600]
         out.append(f"  [{i}] {title}")
         out.append(f"      🔗 {url}")
         if snippet:
@@ -795,26 +795,33 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
             })
             with opener.open(req, timeout=5) as r:
                 html = r.read().decode("utf-8", errors="ignore")
-            # Bing 用 <cite> 存真实 URL，<h2><a> 存标题
-            h2_re = re.compile(r'<h2[^>]*>\s*<a[^>]*?>(.*?)</a>\s*</h2>', re.IGNORECASE)
-            cite_re = re.compile(r'<cite[^>]*>(.*?)</cite>', re.IGNORECASE)
-            titles = []
-            for m in h2_re.finditer(html):
-                t = re.sub(r'<[^>]+>', '', m.group(1)).strip().replace('&amp;', '&')
-                if t:
-                    titles.append(t)
-            urls = []
-            for m in cite_re.finditer(html):
-                raw_url = re.sub(r'<[^>]+>', '', m.group(1)).strip()
-                if raw_url.startswith('http'):
-                    urls.append(raw_url)
-                else:
-                    # "site.com › path" 格式
-                    domain = raw_url.split('›')[0].strip()
-                    urls.append('https://' + domain)
-            for i in range(min(len(titles), len(urls))):
-                if titles[i] and urls[i]:
-                    raw_results.append({"title": titles[i], "url": urls[i], "snippet": ""})
+            # 提取完整 b_algo 块（包含标题+URL+所有文本，非仅 <p> 段落）
+            block_re = re.compile(r'<li[^>]*class="b_algo"[^>]*>([\s\S]*?)</li>', re.IGNORECASE)
+            for bm in block_re.finditer(html):
+                if len(raw_results) >= n:
+                    break
+                block = bm.group(1)
+                # 标题
+                h2 = re.search(r'<h2[^>]*><a[^>]*>(.*?)</a>', block, re.IGNORECASE)
+                title = re.sub(r'<[^>]+>', '', h2.group(1)).strip().replace('&amp;', '&') if h2 else ""
+                # URL (cite)
+                cite = re.search(r'<cite[^>]*>(.*?)</cite>', block, re.IGNORECASE)
+                raw_url = re.sub(r'<[^>]+>', '', cite.group(1)).strip() if cite else ""
+                url = raw_url if raw_url.startswith('http') else 'https://' + raw_url.split('›')[0].strip()
+                # 富摘要：整块纯文本，去掉标题和URL
+                full_text = re.sub(r'<[^>]+>', ' ', block)
+                full_text = full_text.replace('&ensp;', ' ').replace('&#0183;', ' • ').replace('&amp;', '&')
+                full_text = full_text.replace('&nbsp;', ' ').replace('&quot;', '"').replace('&#39;', "'")
+                full_text = re.sub(r'\s+', ' ', full_text).strip()
+                snippet = full_text
+                if title:
+                    snippet = snippet.replace(title, '').strip()
+                if raw_url:
+                    snippet = snippet.replace(raw_url, '').strip()
+                if len(snippet) > 600:
+                    snippet = snippet[:600] + ' [...]'
+                if title and url:
+                    raw_results.append({"title": title, "url": url, "snippet": snippet})
             engine_used = "Bing"
         except Exception:
             pass

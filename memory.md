@@ -79,3 +79,6 @@
 - 抓取: https://react.dev/blog/2024/12/05/react-19
 - 抓取: https://react.dev/blog/2024/04/25/react-19-upgrade-guide
 - 查询: 派遣2个子代理并行调研：1.搜索"TSLA stock price" 2.搜索"React 19 features"。各搜一次，给我简要总结。
+- 查询: 联网搜索特斯拉(TSLA)当前最新股价。要求：1) 只用 web_search 工具搜索一次，关键词必须包含 'TSLA stock price August
+- 查询: 联网搜索 Python 3.13 的新特性。要求：1) 只用 web_search 工具搜索一次，关键词 'Python 3.13 new features'（
+- 查询: 派遣2个子代理并行：1.搜索TSLA股价 2.搜索Python 3.13新特性。各搜一次给我简要总结。
