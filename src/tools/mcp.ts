@@ -306,3 +306,163 @@ registry.register(
     return lines.join("\n");
   },
 );
+
+// ══════════════════════════════════════════════════════════════
+// 持久化 MCP 会话管理 (与 Python tools_mcp.py 对齐)
+// ══════════════════════════════════════════════════════════════
+
+interface McpSession {
+  proc: ReturnType<typeof spawn>;
+  toolsCache: string;
+  nextId: number;
+  pending: Map<number, (data: any) => void>;
+  buffer: string;
+}
+
+const _sessions = new Map<string, McpSession>();
+
+function _sendRpc(session: McpSession, method: string, params: any = {}): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const id = session.nextId++;
+    const msg = JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n";
+    session.pending.set(id, (data) => {
+      if (data.error) reject(new Error(data.error.message || JSON.stringify(data.error)));
+      else resolve(data.result);
+    });
+    try {
+      if (!session.proc.stdin) { reject(new Error("stdin 不可用")); return; }
+      session.proc.stdin.write(msg);
+    } catch (e) { reject(e); }
+    setTimeout(() => {
+      if (session.pending.has(id)) {
+        session.pending.delete(id);
+        reject(new Error("RPC 超时 (30s)"));
+      }
+    }, 30000);
+  });
+}
+
+function _initSession(session: McpSession): Promise<void> {
+  return new Promise(async (resolve, reject) => {
+    if (!session.proc.stdout || !session.proc.stdin) { reject(new Error("stdio 不可用")); return; }
+    session.proc.stdout.on("data", (chunk: Buffer) => {
+      session.buffer += chunk.toString();
+      let idx;
+      while ((idx = session.buffer.indexOf("\n")) >= 0) {
+        const line = session.buffer.slice(0, idx).trim();
+        session.buffer = session.buffer.slice(idx + 1);
+        if (!line) continue;
+        try {
+          const msg = JSON.parse(line);
+          if (msg.id != null && session.pending.has(msg.id)) {
+            const cb = session.pending.get(msg.id)!;
+            session.pending.delete(msg.id);
+            cb(msg);
+          }
+        } catch { /* ignore non-JSON */ }
+      }
+    });
+    session.proc.on("error", (e) => reject(e));
+    session.proc.on("exit", (code) => {
+      if (code !== 0 && session.pending.size > 0) reject(new Error(`进程退出 (code=${code})`));
+    });
+    try {
+      await _sendRpc(session, "initialize", {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "cortex-agent", version: "2.7.0" },
+      });
+      if (session.proc.stdin) {
+        session.proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+      }
+      resolve();
+    } catch (e) { reject(e); }
+  });
+}
+
+registry.register(
+  "启动持久化 MCP 服务器会话。适用于浏览器控制等需要跨调用保持状态的 MCP。\n"
+  + '用法: mcp_session_start(session_id="browser1", server_command="npx", server_args="-y chrome-devtools-mcp@latest")\n'
+  + "启动后用 mcp_session_call 多次调用工具，最后用 mcp_session_stop 关闭。",
+  RiskLevel.SYSTEM, Capability.MCP,
+  { workDir: "string", session_id: "string", server_command: "string", server_args: "string" },
+  async function mcp_session_start(_wd: string, args: Record<string, unknown>): Promise<string> {
+    const sid = String(args["session_id"] || "");
+    const cmd = String(args["server_command"] || "");
+    const sargs = String(args["server_args"] || "");
+    if (!sid || !cmd) return "(x) 需要 session_id 和 server_command";
+    // 关闭已有同名会话
+    if (_sessions.has(sid)) {
+      const old = _sessions.get(sid)!;
+      try { old.proc.kill(); } catch { /* ignore */ }
+      _sessions.delete(sid);
+    }
+    const cmdArgs = sargs ? sargs.split(/\s+/).filter(Boolean) : [];
+    const proc = spawn(cmd, cmdArgs, { stdio: ["pipe", "pipe", "pipe"] });
+    const session: McpSession = { proc, toolsCache: "", nextId: 1, pending: new Map(), buffer: "" };
+    try {
+      await _initSession(session);
+      const toolsResult = await _sendRpc(session, "tools/list", {});
+      const tools = (toolsResult?.tools || []).map((t: any) => `  • ${t.name}: ${(t.description || "").slice(0, 60)}`).join("\n");
+      session.toolsCache = tools || "(无工具)";
+      _sessions.set(sid, session);
+      return `✅ 会话 '${sid}' 已启动\n可用工具:\n${session.toolsCache}`;
+    } catch (e: any) {
+      try { proc.kill(); } catch { /* ignore */ }
+      return `(x) 启动失败: ${e.message || e}`;
+    }
+  },
+);
+
+registry.register(
+  "在持久化 MCP 会话中调用工具（会话必须已通过 mcp_session_start 启动）。\n"
+  + '用法: mcp_session_call(session_id="browser1", tool_name="navigate", tool_args=\'{"url":"https://example.com"}\')',
+  RiskLevel.SYSTEM, Capability.MCP,
+  { workDir: "string", session_id: "string", tool_name: "string", tool_args: "string" },
+  async function mcp_session_call(_wd: string, args: Record<string, unknown>): Promise<string> {
+    const sid = String(args["session_id"] || "");
+    const toolName = String(args["tool_name"] || "");
+    const toolArgs = String(args["tool_args"] || "{}");
+    const session = _sessions.get(sid);
+    if (!session) return `(x) 会话 '${sid}' 不存在，请先 mcp_session_start`;
+    let parsedArgs: any = {};
+    try { parsedArgs = JSON.parse(toolArgs); } catch { return `(x) tool_args 不是有效 JSON: ${toolArgs.slice(0, 100)}`; }
+    try {
+      const result = await _sendRpc(session, "tools/call", { name: toolName, arguments: parsedArgs });
+      const content = (result?.content || []).map((c: any) => c.text || JSON.stringify(c)).join("\n");
+      return content || "(无返回内容)";
+    } catch (e: any) { return `(x) 调用失败: ${e.message || e}`; }
+  },
+);
+
+registry.register(
+  "列出持久化 MCP 会话中可用的工具。\n"
+  + '用法: mcp_session_list_tools(session_id="browser1")',
+  RiskLevel.SYSTEM, Capability.MCP,
+  { workDir: "string", session_id: "string" },
+  async function mcp_session_list_tools(_wd: string, args: Record<string, unknown>): Promise<string> {
+    const sid = String(args["session_id"] || "");
+    const session = _sessions.get(sid);
+    if (!session) return `(x) 会话 '${sid}' 不存在`;
+    try {
+      const result = await _sendRpc(session, "tools/list", {});
+      const tools = (result?.tools || []).map((t: any) => `  • ${t.name}: ${(t.description || "").slice(0, 60)}`).join("\n");
+      return tools || "(无工具)";
+    } catch (e: any) { return `(x) 列出工具失败: ${e.message || e}`; }
+  },
+);
+
+registry.register(
+  "关闭持久化 MCP 会话并释放资源。\n"
+  + '用法: mcp_session_stop(session_id="browser1")',
+  RiskLevel.SYSTEM, Capability.MCP,
+  { workDir: "string", session_id: "string" },
+  function mcp_session_stop(_wd: string, args: Record<string, unknown>): string {
+    const sid = String(args["session_id"] || "");
+    const session = _sessions.get(sid);
+    if (!session) return `(x) 会话 '${sid}' 不存在`;
+    try { session.proc.kill(); } catch { /* ignore */ }
+    _sessions.delete(sid);
+    return `✅ 会话 '${sid}' 已关闭`;
+  },
+);

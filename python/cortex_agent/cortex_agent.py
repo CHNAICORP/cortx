@@ -760,6 +760,8 @@ class CortexAgent:
         self._allowed_tools: Optional[set] = None
         self._disallowed_tools: Optional[set] = None
         self._screenshot_streak = 0
+        self._last_tool_sig = ""
+        self._repeat_count = 0
         # ── Non-interactive mode (pipe/CI) ──
         self._non_interactive: bool = False
         # ── Setup tool context ──
@@ -940,6 +942,8 @@ class CortexAgent:
         else:
             self._ctx = self.governor.append_user(self._ctx, query)
         self._screenshot_streak = 0  # 重置截图计数器
+        self._last_tool_sig = ""
+        self._repeat_count = 0
         # ── Auto-inject relevant skills based on user query ──
         self._auto_inject_skills(query)
         result = self._loop(max_steps or self.config.max_steps)
@@ -1346,6 +1350,25 @@ class CortexAgent:
                 cap = meta["capability"] if meta else None
                 if self._term:
                     self._term.tool_start(name, args)
+                # ── 循环检测：相同工具+参数连续调用时拦截 ──
+                import json as _json_sig
+                tool_sig = name + ":" + _json_sig.dumps(args, sort_keys=True, ensure_ascii=False)
+                if tool_sig == self._last_tool_sig:
+                    self._repeat_count += 1
+                    if self._repeat_count >= 5:
+                        ok, reason = False, (f"(x) [循环检测] {name} 已连续相同调用 {self._repeat_count} 次，"
+                                              "疑似陷入循环。请换一种方法或检查之前的错误。")
+                        self._repeat_count = 0
+                        self._last_tool_sig = ""
+                        latency = (time.time() - t0) * 1000
+                        if self._term:
+                            self._term.tool_done(ok, latency, reason)
+                        self._ctx.append({"role": "tool", "tool_call_id": tc["id"],
+                                          "content": self.governor.finalize_tool_result(reason)})
+                        continue
+                else:
+                    self._repeat_count = 0
+                self._last_tool_sig = tool_sig
                 # ── 工具白名单/黑名单过滤 ──
                 if self._allowed_tools and name not in self._allowed_tools:
                     ok, reason = False, f"工具 {name} 不在白名单中"

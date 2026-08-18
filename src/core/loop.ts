@@ -506,6 +506,8 @@ export class CortexAgent {
   private rejectionCounts = new Map<Capability, number>();
   private suspendedCaps = new Set<Capability>();
   private _screenshotStreak = 0;
+  private _lastToolSig = "";
+  private _repeatCount = 0;
   private permissionDecisions = new Map<string, boolean>();
   private sessionId: string | null = null;
   private queryCount = 0;
@@ -906,6 +908,8 @@ this._skillMgr = new SkillManager(this.config.workDir);
       this.ctx = this.governor.appendUser(this.ctx, query);
     }
     this._screenshotStreak = 0; // 重置截图计数器
+    this._lastToolSig = "";
+    this._repeatCount = 0;
     // ── Auto-inject relevant skills based on user query ──
     this._autoInjectSkills(query);
     const result = await this._loop(maxSteps || this.config.maxSteps);
@@ -1242,6 +1246,25 @@ this._skillMgr = new SkillManager(this.config.workDir);
         if (this.term) this.term.toolStart(tc.name, tc.args);
         let ok: boolean;
         let reason: string;
+
+        // ── 循环检测：相同工具+参数连续调用时警告或拦截 ──
+        const toolSig = tc.name + ":" + JSON.stringify(tc.args);
+        if (toolSig === this._lastToolSig) {
+          this._repeatCount++;
+          if (this._repeatCount >= 5) {
+            ok = false;
+            reason = `(x) [循环检测] ${tc.name} 已连续相同调用 ${this._repeatCount} 次，疑似陷入循环。请换一种方法或检查之前的错误。`;
+            this._repeatCount = 0;
+            this._lastToolSig = "";
+            const latency0 = Date.now() - t0;
+            if (this.term) this.term.toolDone(false, latency0, reason);
+            this.ctx.push({ role: "tool", tool_call_id: tc.id, content: this.governor.finalizeToolResult(reason) });
+            continue;
+          }
+        } else {
+          this._repeatCount = 0;
+        }
+        this._lastToolSig = toolSig;
 
         // ── 工具白名单/黑名单过滤 ──
         if (this._allowedTools && !this._allowedTools.has(tc.name)) {
