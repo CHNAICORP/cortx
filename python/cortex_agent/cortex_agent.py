@@ -1122,13 +1122,14 @@ class CortexAgent:
             sub_agent = CortexAgent(sub_config)
             sub_agent._non_interactive = True
             sub_agent._hooks = self._hooks
-            # 工具过滤：指定 tools 则限制子代理只能用这些工具
+            # 子代理禁止再派遣子代理（代码层面强制，避免嵌套导致 API 费用爆炸）
+            _SUBAGENT_BLOCKED = {"spawn_subagent", "spawn_subagents"}
+
             if tools:
                 # 用户指定了 tools 参数：使用白名单，但添加常用工具确保子代理不会因缺少工具而受阻
                 tools_list = [t.strip() for t in tools.split(",") if t.strip()]
-                # 除极端危险工具外，常用工具全部放行
                 _COMMON = [
-                    "spawn_subagent", "spawn_subagents", "list_tools", "get_current_time",
+                    "list_tools", "get_current_time",
                     "read_file", "write_file", "edit_file", "glob", "grep", "list_directory",
                     "diff_files", "read_json", "file_ops", "csv_query",
                     "run_shell_command", "run_python", "execute_sql_query", "python_lint",
@@ -1143,12 +1144,16 @@ class CortexAgent:
                 for e in _COMMON:
                     if e not in tools_list:
                         tools_list.append(e)
-                sub_agent.set_tool_filter(allowed=tools_list)
+                # 从白名单中移除被禁止的工具
+                tools_list = [t for t in tools_list if t not in _SUBAGENT_BLOCKED]
+                sub_agent.set_tool_filter(allowed=tools_list, disallowed=list(_SUBAGENT_BLOCKED))
             else:
-                # 未指定 tools：放行所有工具（PolicyEngine 提供安全审计）
-                # 不继承父代理白名单 — 子代理应能自由使用所有非极端危险工具
+                # 未指定 tools：放行所有工具，但禁止子代理派遣
                 sub_agent._allowed_tools = None
-                sub_agent._disallowed_tools = self._disallowed_tools
+                blocked = set(_SUBAGENT_BLOCKED)
+                if self._disallowed_tools:
+                    blocked.update(self._disallowed_tools)
+                sub_agent._disallowed_tools = blocked
             sub_agent._setup_tool_context()
             import time as _st
             _t0 = _st.time()

@@ -618,12 +618,14 @@ this._skillMgr = new SkillManager(this.config.workDir);
     const subAgent = new CortexAgent(subConfig);
     subAgent._nonInteractive = true;
     subAgent._hooks = this._hooks;
+    // 子代理禁止再派遣子代理（代码层面强制，避免嵌套导致 API 费用爆炸）
+    const SUBAGENT_BLOCKED = new Set(["spawn_subagent", "spawn_subagents"]);
+
     if (tools) {
       // 用户指定了 tools 参数：使用白名单，但添加常用工具确保子代理不会因缺少工具而受阻
       const toolsList = tools.split(",").map(t => t.trim()).filter(Boolean);
-      // 除极端危险工具外，常用工具全部放行
       const COMMON = [
-        "spawn_subagent", "spawn_subagents", "list_tools", "get_current_time",
+        "list_tools", "get_current_time",
         "read_file", "write_file", "edit_file", "glob", "grep", "list_directory",
         "diff_files", "read_json", "file_ops", "csv_query",
         "run_shell_command", "run_python", "execute_sql_query", "python_lint",
@@ -636,12 +638,15 @@ this._skillMgr = new SkillManager(this.config.workDir);
         "mcp_list_servers", "mcp_registry",
       ];
       for (const e of COMMON) { if (!toolsList.includes(e)) toolsList.push(e); }
-      subAgent.setToolFilter(toolsList, null);
+      // 从白名单中移除被禁止的工具
+      const filtered = toolsList.filter(t => !SUBAGENT_BLOCKED.has(t));
+      subAgent.setToolFilter(filtered, [...SUBAGENT_BLOCKED]);
     } else {
-      // 未指定 tools：放行所有工具（PolicyEngine 提供安全审计）
-      // 不继承父代理白名单 — 子代理应能自由使用所有非极端危险工具
+      // 未指定 tools：放行所有工具，但禁止子代理派遣
       subAgent._allowedTools = null;
-      subAgent._disallowedTools = this._disallowedTools;
+      const blocked = new Set(SUBAGENT_BLOCKED);
+      if (this._disallowedTools) for (const t of this._disallowedTools) blocked.add(t);
+      subAgent._disallowedTools = blocked;
     }
     // 设置子代理终端（内联流式显示）
     let subTerm: SubagentTerminal | null = null;
