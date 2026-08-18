@@ -73,3 +73,9 @@
 - 搜索到: Electric Cars, Solar & Clean Energy | Tesla
 - 抓取: https://www.nasdaq.com/market-activity/stocks/tsla
 - 查询: 用 spawn_subagents 派遣2个子代理，限定工具为 web_search,web_fetch：1.搜索TSLA股价 2.搜索SpaceX估值。各搜一
+- 查询: 调研特斯拉(TSLA)最新股价。要求：1) 先调用 get_current_time 获取当前时间；2) 只用 web_search 搜索一次，关键词必须包含
+- 查询: 调研 React 19 的核心新特性。要求：1) 只用 web_search 搜索一次，关键词 'React 19 features'（可附加 '2025' 或
+- 搜索到: React
+- 抓取: https://react.dev/blog/2024/12/05/react-19
+- 抓取: https://react.dev/blog/2024/04/25/react-19-upgrade-guide
+- 查询: 派遣2个子代理并行调研：1.搜索"TSLA stock price" 2.搜索"React 19 features"。各搜一次，给我简要总结。

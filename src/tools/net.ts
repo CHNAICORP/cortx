@@ -182,7 +182,7 @@ registry.register(
     let rawResults: SearchItem[] = [];
     let engineUsed = "";
 
-    // ── Firecrawl Search（默认引擎，免费 keyless，国内直连）──
+    // ── Firecrawl Search（优先引擎，免费 keyless，限速时回退）──
     if (!rawResults.length) {
       try {
         const fcResp = await fetch("https://api.firecrawl.dev/v1/search", {
@@ -193,7 +193,7 @@ registry.register(
             limit: n,
             ...(allowed ? { includeDomains: allowed } : {}),
           }),
-          signal: AbortSignal.timeout(10000),
+          signal: AbortSignal.timeout(8000),
         });
         if (fcResp.ok) {
           const fcData = await fcResp.json() as { data?: Array<{ url?: string; title?: string; description?: string }> };
@@ -208,6 +208,7 @@ registry.register(
           }
           if (rawResults.length) engineUsed = "Firecrawl";
         }
+        // 429 限速时不报错，静默回退到 Bing
       } catch { /* fall through */ }
     }
 
@@ -471,33 +472,56 @@ registry.register(
       return cached[1] + "\n[缓存命中]";
     }
 
-    // ── 策略 0: Firecrawl Scrape（默认，干净 Markdown，国内直连）──
-    try {
-      const fcResp = await fetch("https://api.firecrawl.dev/v1/scrape", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url, formats: ["markdown"] }),
-        signal: AbortSignal.timeout(10000),
-      });
-      if (fcResp.ok) {
-        const fcData = await fcResp.json() as { data?: { markdown?: string; metadata?: { title?: string } } };
-        const md = fcData.data?.markdown || "";
-        const title = fcData.data?.metadata?.title || "";
-        if (md.length > 100) {
-          let text = md;
-          if (text.length > limit) {
-            const keepHead = Math.floor(limit * 0.8);
-            const keepTail = Math.floor(limit * 0.15);
-            text = text.slice(0, keepHead) + `\n\n[... 已截断，原文 ${text.length} 字符 ...]\n\n` + text.slice(-keepTail);
+    // ── 策略 0: Firecrawl Scrape（优先，干净 Markdown，限速时回退）──
+    // 对 GitHub 等国内不稳定域名特别有效（Firecrawl 云端代理访问）
+    const isBlockedDomain = isSlowDomain(url) || url.includes("github.com") || url.includes("huggingface.co");
+    if (true) {
+      try {
+        const fcResp = await fetch("https://api.firecrawl.dev/v1/scrape", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url, formats: ["markdown"] }),
+          signal: AbortSignal.timeout(isBlockedDomain ? 8000 : 5000),
+        });
+        if (fcResp.ok) {
+          const fcData = await fcResp.json() as { data?: { markdown?: string; metadata?: { title?: string } } };
+          const md = fcData.data?.markdown || "";
+          const title = fcData.data?.metadata?.title || "";
+          if (md.length > 100) {
+            let text = md;
+            if (text.length > limit) {
+              const keepHead = Math.floor(limit * 0.8);
+              const keepTail = Math.floor(limit * 0.15);
+              text = text.slice(0, keepHead) + `\n\n[... 已截断，原文 ${text.length} 字符 ...]\n\n` + text.slice(-keepTail);
+            }
+            const header = `--- ${url} ---${title ? `\n标题: ${title}` : ""}\n\n`;
+            const result = header + text;
+            if (_fetchCache.size >= FETCH_CACHE_MAX) _fetchCache.clear();
+            _fetchCache.set(cacheKey, [Date.now(), result]);
+            return result;
           }
-          const header = `--- ${url} ---${title ? `\n标题: ${title}` : ""}\n\n`;
-          const result = header + text;
-          if (_fetchCache.size >= FETCH_CACHE_MAX) _fetchCache.clear();
-          _fetchCache.set(cacheKey, [Date.now(), result]);
-          return result;
         }
+        // 429 限速或空结果，静默回退
+      } catch { /* fall through to HTTP */ }
+    }
+
+    // ── 国内不稳定域名：跳过原始 HTTP（必然超时），直接用 Jina Reader ──
+    if (isBlockedDomain) {
+      const jinaText = await jinaReader(url, 8000);
+      if (jinaText && jinaText.length > 100) {
+        let text = jinaText;
+        if (text.length > limit) {
+          const keepHead = Math.floor(limit * 0.8);
+          const keepTail = Math.floor(limit * 0.15);
+          text = text.slice(0, keepHead) + `\n\n[... 已截断，原文 ${text.length} 字符 ...]\n\n` + text.slice(-keepTail);
+        }
+        const result = `--- ${url} ---\n\n${text}`;
+        if (_fetchCache.size >= FETCH_CACHE_MAX) _fetchCache.clear();
+        _fetchCache.set(cacheKey, [Date.now(), result]);
+        return result;
       }
-    } catch { /* fall through to HTTP */ }
+      return `(x) 抓取失败: ${url} 是国内不稳定域名（GitHub/HuggingFace 等），Firecrawl 限速且直连超时。建议稍后重试或换用其他来源。`;
+    }
 
     // ── 策略 1: 原始 HTTP + HTML 解析（回退）──
     try {

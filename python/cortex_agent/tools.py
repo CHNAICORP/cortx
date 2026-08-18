@@ -987,7 +987,8 @@ def web_fetch(work_dir: str, url: str, max_chars: int = 0) -> str:
         if _time.time() - cached_time < _FETCH_CACHE_TTL:
             return cached_text + "\n[缓存命中]"
 
-    # ── 策略 0: Firecrawl Scrape（默认，干净 Markdown，国内直连）──
+    # ── 策略 0: Firecrawl Scrape（优先，干净 Markdown，限速时回退）──
+    _is_blocked = any(d in url for d in _SLOW_DOMAINS) or "github.com" in url or "huggingface.co" in url
     try:
         import json as _json
         fc_data = _json.dumps({"url": url, "formats": ["markdown"]}).encode()
@@ -997,7 +998,7 @@ def web_fetch(work_dir: str, url: str, max_chars: int = 0) -> str:
             headers={"Content-Type": "application/json"},
             method="POST"
         )
-        with opener.open(fc_req, timeout=10) as r:
+        with opener.open(fc_req, timeout=8 if _is_blocked else 5) as r:
             fc_result = _json.loads(r.read().decode("utf-8", errors="ignore"))
         md = fc_result.get("data", {}).get("markdown", "")
         title = fc_result.get("data", {}).get("metadata", {}).get("title", "")
@@ -1015,6 +1016,33 @@ def web_fetch(work_dir: str, url: str, max_chars: int = 0) -> str:
             return result
     except Exception:
         pass
+
+    # ── 国内不稳定域名：跳过原始 HTTP（必然超时），直接用 Jina Reader ──
+    if _is_blocked:
+        try:
+            jina_url = f"https://r.jina.ai/{url}"
+            jina_req = urllib.request.Request(jina_url, headers={
+                "User-Agent": "cortex-agent",
+                "Accept": "text/plain",
+            })
+            opener = _build_opener()
+            with opener.open(jina_req, timeout=8) as r:
+                if r.status == 200:
+                    jina_text = r.read(204800).decode("utf-8", errors="ignore").strip()
+                    if jina_text and len(jina_text) > 100:
+                        text = jina_text
+                        if len(text) > limit:
+                            keep_head = int(limit * 0.8)
+                            keep_tail = int(limit * 0.15)
+                            text = text[:keep_head] + f"\n\n[... 已截断，原文 {len(text)} 字符 ...]\n\n" + text[-keep_tail:]
+                        result = f"--- {url} ---\n\n{text}"
+                        if len(_fetch_cache) >= _FETCH_CACHE_MAX:
+                            _fetch_cache.clear()
+                        _fetch_cache[cache_key] = (_time.time(), result)
+                        return result
+        except Exception:
+            pass
+        return f"(x) 抓取失败: {url} 是国内不稳定域名（GitHub/HuggingFace 等），Firecrawl 限速且直连超时。建议稍后重试或换用其他来源。"
 
     # ── 策略 1: Jina Reader（备用，干净 Markdown，处理 JS 渲染）──
     try:
