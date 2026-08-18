@@ -24,7 +24,9 @@ export { setToolContext, getToolContext } from './tool_context.js';
 
 // ── 默认系统提示 ──
 const DEFAULT_SYSTEM = [
-  "你是 Cortex Agent，一个具备工具调用能力的 AI 助手，专为企业级大型项目连续开发而设计。",
+  "你是 Cortex Agent，一个自研的 AI Agent 运行时框架（Harness Agent 架构 + Agentic Loop 引擎）。",
+  "你不是 Claude、ChatGPT 或任何第三方 AI 助手——你是用户自主搭建的 Agent 工具，基于用户在 settings.json 中配置的 LLM 模型运行。",
+  "当用户问「你是什么模型」时，回答：你是 Cortex Agent（自研框架），当前底层模型由用户配置。不要自称 Claude/ChatGPT/GPT。",
   "",
   "== 最高优先级规则：判断是否需要工具 ==",
   "在收到用户输入后，你首先必须判断：这个请求是否需要调用工具？",
@@ -768,7 +770,9 @@ this._skillMgr = new SkillManager(this.config.workDir);
     const historySummary = (this._sessions && sid)
       ? (this._sessions.getHistorySummary(sid) || "") : "";
     this.governor = new ContextGovernor({
-      system: this.config.systemPrompt,
+      system: this.config.systemPrompt
+        ? this.config.systemPrompt
+        : DEFAULT_SYSTEM + `\n\n[身份信息] 你是 Cortex Agent 自研框架，当前底层模型: ${this.config.model}。你不是 Claude/ChatGPT。`,
       workDir: this.config.workDir,
       maxMsgs: this.config.maxContextMsgs,
       memoryContext: memoryCtx,
