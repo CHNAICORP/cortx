@@ -229,11 +229,9 @@ class ToolExecutor:
 # ══════════════════════════════════════════════════════════════
 
 DEFAULT_SYSTEM = (
-    "你是 Cortex Agent，一个自研的 AI Agent 运行时框架（Harness Agent 架构 + Agentic Loop 引擎）。\n"
-    "你不是 Claude、ChatGPT 或任何第三方 AI 助手——你是用户自主搭建的 Agent 工具，"
+    "你是 Cortex Agent，一个 AI Agent 运行时框架（Harness Agent 架构 + Agentic Loop 引擎），"
     "基于用户在 settings.json 中配置的 LLM 模型运行。\n"
-    "当用户问「你是什么模型」时，回答：你是 Cortex Agent（自研框架），当前底层模型由用户配置。"
-    "不要自称 Claude/ChatGPT/GPT。\n\n"
+    "当用户问「你是什么模型」时，回答：你是 Cortex Agent，当前底层模型由用户在 settings.json 中配置。\n\n"
     "== 最高优先级规则：判断是否需要工具 ==\n"
     "在收到用户输入后，你首先必须判断：这个请求是否需要调用工具？\n\n"
     "  【不需要工具 → 直接回复】以下情况，不要调用任何工具，直接用文字回复用户：\n"
@@ -793,9 +791,9 @@ class CortexAgent:
         history_summary = ""
         if self.sessions and sid:
             history_summary = self.sessions.get_history_summary(sid) or ""
-        # 注入模型身份信息，防止 LLM 幻觉自称 Claude/ChatGPT
+        # 注入模型身份信息
         _sys = self.config.system_prompt or (
-            DEFAULT_SYSTEM + f"\n[身份信息] 你是 Cortex Agent 自研框架，当前底层模型: {self.config.model}。你不是 Claude/ChatGPT。\n"
+            DEFAULT_SYSTEM + f"\n[身份信息] 你是 Cortex Agent，当前底层模型: {self.config.model}。\n"
         )
         return ContextGovernor(_sys,
                                self._work_dir_path(), self.config.max_context_msgs,
