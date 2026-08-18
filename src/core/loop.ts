@@ -606,23 +606,28 @@ this._skillMgr = new SkillManager(this.config.workDir);
     subAgent._nonInteractive = true;
     subAgent._hooks = this._hooks;
     if (tools) {
+      // 用户指定了 tools 参数：使用白名单，但添加常用工具确保子代理不会因缺少工具而受阻
       const toolsList = tools.split(",").map(t => t.trim()).filter(Boolean);
-      // 始终允许子代理自身派遣子代理 + 基础工具
-      const ESSENTIAL = ["spawn_subagent", "spawn_subagents", "list_tools", "get_current_time"];
-      for (const e of ESSENTIAL) { if (!toolsList.includes(e)) toolsList.push(e); }
+      // 除极端危险工具外，常用工具全部放行
+      const COMMON = [
+        "spawn_subagent", "spawn_subagents", "list_tools", "get_current_time",
+        "read_file", "write_file", "edit_file", "glob", "grep", "list_directory",
+        "diff_files", "read_json", "file_ops", "csv_query",
+        "run_shell_command", "run_python", "execute_sql_query", "python_lint",
+        "run_background_command", "check_server_status", "stop_background_process", "list_background_processes",
+        "web_search", "web_fetch", "http_request",
+        "remember_fact", "recall_fact", "forget_fact", "ask_user",
+        "list_skills", "use_skill",
+        "git_status", "git_diff", "git_log",
+        "set_proxy", "show_proxy", "search_knowledge",
+        "mcp_list_servers", "mcp_registry",
+      ];
+      for (const e of COMMON) { if (!toolsList.includes(e)) toolsList.push(e); }
       subAgent.setToolFilter(toolsList, null);
     } else {
-      // 继承父代理白名单时，确保子代理工具也在白名单中
-      if (this._allowedTools) {
-        const inherited = new Set(this._allowedTools);
-        inherited.add("spawn_subagent");
-        inherited.add("spawn_subagents");
-        inherited.add("list_tools");
-        inherited.add("get_current_time");
-        subAgent._allowedTools = inherited;
-      } else {
-        subAgent._allowedTools = null;
-      }
+      // 未指定 tools：放行所有工具（PolicyEngine 提供安全审计）
+      // 不继承父代理白名单 — 子代理应能自由使用所有非极端危险工具
+      subAgent._allowedTools = null;
       subAgent._disallowedTools = this._disallowedTools;
     }
     // 设置子代理终端（内联流式显示）

@@ -1110,21 +1110,30 @@ class CortexAgent:
             sub_agent._hooks = self._hooks
             # 工具过滤：指定 tools 则限制子代理只能用这些工具
             if tools:
+                # 用户指定了 tools 参数：使用白名单，但添加常用工具确保子代理不会因缺少工具而受阻
                 tools_list = [t.strip() for t in tools.split(",") if t.strip()]
-                # 始终允许子代理自身派遣子代理 + 基础工具
-                _ESSENTIAL = ["spawn_subagent", "spawn_subagents", "list_tools", "get_current_time"]
-                for e in _ESSENTIAL:
+                # 除极端危险工具外，常用工具全部放行
+                _COMMON = [
+                    "spawn_subagent", "spawn_subagents", "list_tools", "get_current_time",
+                    "read_file", "write_file", "edit_file", "glob", "grep", "list_directory",
+                    "diff_files", "read_json", "file_ops", "csv_query",
+                    "run_shell_command", "run_python", "execute_sql_query", "python_lint",
+                    "run_background_command", "check_server_status", "stop_background_process", "list_background_processes",
+                    "web_search", "web_fetch", "http_request",
+                    "remember_fact", "recall_fact", "forget_fact", "ask_user",
+                    "list_skills", "use_skill",
+                    "git_status", "git_diff", "git_log",
+                    "set_proxy", "show_proxy", "search_knowledge",
+                    "mcp_list_servers", "mcp_registry",
+                ]
+                for e in _COMMON:
                     if e not in tools_list:
                         tools_list.append(e)
                 sub_agent.set_tool_filter(allowed=tools_list)
             else:
-                # 继承父代理白名单时，确保子代理工具也在白名单中
-                if self._allowed_tools:
-                    inherited = set(self._allowed_tools)
-                    inherited.update(["spawn_subagent", "spawn_subagents", "list_tools", "get_current_time"])
-                    sub_agent._allowed_tools = inherited
-                else:
-                    sub_agent._allowed_tools = None
+                # 未指定 tools：放行所有工具（PolicyEngine 提供安全审计）
+                # 不继承父代理白名单 — 子代理应能自由使用所有非极端危险工具
+                sub_agent._allowed_tools = None
                 sub_agent._disallowed_tools = self._disallowed_tools
             sub_agent._setup_tool_context()
             import time as _st
