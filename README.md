@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![TypeScript](https://img.shields.io/badge/typescript-5.x-blue.svg)](https://www.typescriptlang.org/)
-[![Node](https://img.shields.io/badge/node-24+-green.svg)](https://nodejs.org/)
+[![Node](https://img.shields.io/badge/node-18+-green.svg)](https://nodejs.org/)
 [![PyPI](https://img.shields.io/pypi/v/cortx.svg)](https://pypi.org/project/cortx/)
 [![npm](https://img.shields.io/npm/v/@chnaicorp/cortx.svg)](https://www.npmjs.com/package/@chnaicorp/cortx)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -18,7 +18,7 @@
 | | Python | TypeScript |
 |---|--------|-----------|
 | 位置 | `python/cortex_agent/` | `src/` |
-| 工具数 | 43 | 43 |
+| 工具数 | 69 | 69 |
 | 安装 | `pip install cortx` | `npm install -g @chnaicorp/cortx` |
 | CLI 命令 | `ctx` | `ctx` |
 
@@ -29,79 +29,110 @@
 ## 快速开始
 
 ```bash
-# Python (3 字母包名)
+# Python
 pip install cortx
 ctx
 
 # TypeScript
 npm install -g @chnaicorp/cortx
-ctx
 ctx                         # 交互 REPL
 ctx -q "hello"              # 单次查询
 ctx --model pro             # 指定模型
-
-# 单次查询
-ctx -q "用 Python 写斐波那契函数"
 ```
 
 ---
 
-## 🎯 Agent 自主开发 Demo
+## 核心能力
 
-> 给 Agent 一句话指令，它自主完成项目规划、架构设计、前后端编码、依赖安装、编译验证、运行调试全流程，**0 人工干预**。
+### 🛠 69 个内置工具
 
-### 🛒 企业级购物网站 — [cortx-demo-shop-app](https://github.com/CHNAICORP/cortx-demo-shop-app)
-
-| 指标 | 数据 |
+| 分类 | 工具 |
 |------|------|
-| **源文件数** | 33 个 |
-| **总代码行数** | 2,612 行 |
-| **技术栈** | React + Vite + Express + TypeScript + SQLite + JWT |
-| **Agent 续行轮次** | 3 轮，182 步 |
-| **人工干预** | 0 次 |
+| **文件** | `list_directory` `read_file` `write_file` `edit_file` `glob` `grep` `diff_files` `file_ops` `read_json` `csv_query` |
+| **执行** | `run_shell_command` `run_python` `execute_sql_query` `python_lint` `run_background_command` `check_server_status` `stop_background_process` `list_background_processes` |
+| **网络** | `web_search` `web_fetch` `http_request` `set_proxy` `unset_proxy` `show_proxy` `pip_mirror` `npm_mirror` |
+| **Git** | `git_status` `git_diff` `git_commit` `git_branch` `git_log` |
+| **MCP** | `mcp_list_servers` `mcp_list_tools` `mcp_call_tool` `mcp_registry` `mcp_install` `mcp_quick` `mcp_session_start` `mcp_session_call` `mcp_session_list_tools` `mcp_session_stop` |
+| **浏览器** | `browser_navigate`（等待页面加载完成）`browser_snapshot`（获取页面文本）`browser_screenshot` |
+| **桌面** | `computer_screenshot` `computer_click` |
+| **Office** | `office_create` `office_send` `office_batch` `office_view` `office_cli` `office_install` |
+| **技能** | `list_skills` `use_skill` `skill_install` `skill_remove` |
+| **子代理** | `spawn_subagent`（单个+工具过滤+技能预加载）`spawn_subagents`（并行 fan-out） |
+| **记忆/任务** | `remember_fact` `recall_fact` `forget_fact` `ask_user` `task_create` `task_list` `task_update` |
+| **元工具** | `list_tools` `get_current_time` `search_knowledge` `rebuild_knowledge_index` |
+
+### 🎓 技能系统 (Skills)
+
+技能是可复用的专家级指引模板，能为特定任务提供专业方法论：
 
 ```bash
-# 复现 Agent 自主开发过程
-ctx --mode yolo --long --max-rounds 0 -q "请开发设计一个企业级购物网站，完整项目包含：
-1.后端(Node.js+Express+TypeScript) RESTful API(商品列表、商品详情、购物车、订单、用户认证JWT)，
-SQLite数据库含products/users/carts/orders表，密码bcrypt加密，中间件CORS/错误处理/JWT验证。
-2.前端(React+Vite+TypeScript) 首页商品展示、商品详情页、购物车管理、用户登录注册、订单提交。
-3.数据库：SQLite自动建表+种子数据至少10个商品。"
+# 查看所有技能
+ctx -q "调用 list_skills 列出你的技能"
+
+# 从 GitHub 安装新技能
+ctx -q '用 skill_install 从 GitHub 安装 alchaincyf/huashu-design'
+
+# 加载技能并按其指引工作
+ctx -q '用 use_skill 加载 code-review 技能，然后审查 src/core/registry.ts'
 ```
 
-👉 **查看完整项目代码**: [github.com/CHNAICORP/cortx-demo-shop-app](https://github.com/CHNAICORP/cortx-demo-shop-app)
+- **7 个内置技能**：code-review、refactor、test-writer、doc-writer、debug、explain、architect
+- **自定义技能**：放在 `.cortx/skills/<name>/SKILL.md`，自动发现注册
+- **技能安装**：`skill_install(source="owner/repo")` 从 GitHub 下载，自动注册立即可用
+- **YAML frontmatter** 支持 + 递归子目录扫描
 
-### 🧱 打砖块游戏 — [cortx-demo-breakout](https://github.com/CHNAICORP/cortx-demo-breakout)
+### 🤖 子代理系统 (Subagents)
 
-| 指标 | 数据 |
-|------|------|
-| **源文件数** | 1 个 (单文件 HTML5) |
-| **总代码行数** | 574 行 |
-| **技术栈** | HTML5 Canvas + 原生 JavaScript + CSS3 |
-| **依赖** | 0 (零依赖、零构建) |
-| **人工干预** | 0 次 |
+参考智谱 Coding Agent Subagents 设计，主 agent 可派遣子代理执行独立任务：
 
 ```bash
-# 复现 Agent 自主开发过程
-ctx -q "用 HTML5 Canvas 做一个打砖块 Breakout 游戏，单文件 index.html，包含：
-多关卡、计分、生命系统、粒子特效、鼠标+键盘+触摸控制、霓虹风格UI"
+# 并行派遣多个子代理
+ctx -q '用 spawn_subagents 并行派遣2个子代理：
+  子代理1用 code-review 技能审查安全性
+  子代理2统计项目 .ts 文件数量'
 ```
 
-👉 **查看游戏源码**: [github.com/CHNAICORP/cortx-demo-breakout](https://github.com/CHNAICORP/cortx-demo-breakout) · 🎮 **直接打开即玩**
+- **并行执行**：`spawn_subagents` 用 `Promise.all`(TS) / `ThreadPoolExecutor`(Python) 并发
+- **工具过滤**：`tools="read_file,grep,glob"` 限制子代理可用工具
+- **技能预加载**：`skill="code-review"` 子代理启动前注入技能指引
+- **进度显示**：`⚡ 派遣 N 个子代理...` + `└ [idx/total] ▶/✓` 实时状态
+- **上下文隔离**：子代理独立上下文，返回结果摘要，不污染主对话
 
-### 🎮 AI 游戏开发 SaaS 平台 — [gamespark](https://github.com/CHNAICORP/gamespark)
+### 🔌 MCP 服务器（预配置开箱即用）
 
-> 使用 **Cortx Agent + LingClaw ADE** 协同开发完成的完整 SaaS 平台。
+安装后即可使用，无需手动配置：
 
-| 指标 | 数据 |
-|------|------|
-| **源文件数** | 36 个 |
-| **技术栈** | React 18 + TypeScript + Vite 5 + Tailwind CSS 3 + Express.js + JWT |
-| **核心功能** | 用户认证、三级订阅、AI 工具集 API、在线游戏体验馆 |
-| **开发方式** | Cortx Agent (代码生成) + LingClaw ADE (IDE 可视化) 协同开发 |
-| **人工干预** | 仅需求描述，编码全自动化 |
+| MCP 服务器 | 工具数 | 用途 | 启动方式 |
+|-----------|--------|------|---------|
+| **chrome-devtools** | 29 | 浏览器导航/截图/DOM/性能分析 | `npx` 自动下载 |
+| **cua-driver** | 55 | 桌面截图/点击/键盘/应用管理/窗口控制 | `cua-driver mcp` |
 
-👉 **查看完整项目代码**: [github.com/CHNAICORP/gamespark](https://github.com/CHNAICORP/gamespark)
+```bash
+# 用 MCP 控制桌面
+ctx -q '用 cua-driver MCP 查看运行的应用和屏幕尺寸'
+
+# 用 MCP 控制浏览器
+ctx -q '用 chrome-devtools MCP 打开 example.com 并获取页面内容'
+```
+
+Agent 自主完成：发现 MCP 注册表 → 列出工具方法 → 选择合适工具 → 调用并获取结果 → 清理会话。
+
+### 🧠 上下文管理优化
+
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| `max_result_chars` | 50000 | 工具结果截断上限（1M 上下文模型下仅占 1.25%） |
+| `compress_threshold` | 6000 | 工具结果压缩阈值（绝大多数结果完整保留） |
+| `compact_input_pct` | 85% | 上下文达 85% 时才触发 compact |
+| `max_steps` | 0（无限）| Agent 自主决定何时完成，循环检测防止卡死 |
+
+### 🛡 验证策略（文本优先）
+
+文本模型（DeepSeek/GLM）无法识别图片，Agent 优先使用文本验证：
+- 页面验证：`browser_snapshot()` 获取页面文本（非截图）
+- 服务验证：`check_server_status()` HTTP 健康检查（自动重试 3 次）
+- 代码验证：`run_shell_command` 运行测试/编译
+- 截图循环检测：连续截图 3+ 次自动注入警告
 
 ---
 
@@ -125,55 +156,34 @@ ctx -q "用 HTML5 Canvas 做一个打砖块 Breakout 游戏，单文件 index.ht
 ## 项目结构
 
 ```
-ctx/
-├── python/cortex_agent/        # Python 包
+cortx/
+├── src/                         # TypeScript 源码
+│   ├── core/                    # 核心引擎 (loop, registry, types, skills, tool_context, policy, llm, hooks, memory_store)
+│   ├── tools/                   # 工具模块 (11 文件: file, exec, net, memory, mcp, browser, proxy, subagent, git, office, skills)
+│   └── cli/                     # CLI 入口 + 终端显示
+│
+├── python/cortex_agent/         # Python 源码
 │   ├── cortex_agent.py          # Agentic Loop 核心引擎
-│   ├── policy.py                # PolicyEngine 安全策略
-│   ├── llm.py                   # LLM Provider (DeepSeek/OpenAI)
-│   ├── tools.py                 # 核心工具 (25)
-│   ├── tools_mcp.py             # MCP 客户端 + 注册表
-│   ├── tools_browser.py         # CDP WebSocket 浏览器
+│   ├── tools.py                 # 核心工具 (41)
+│   ├── tools_mcp.py             # MCP 客户端 + 注册表 + 会话管理
+│   ├── tools_browser.py         # CDP 浏览器 (导航等待+文本快照)
 │   ├── tools_computer.py        # 桌面控制
 │   ├── tools_network.py         # 代理/镜像
+│   ├── tools_office.py          # Office 文档
 │   ├── tools_rag.py             # RAG 知识检索
-│   ├── main.py                  # CLI 入口
-│   ├── terminal.py              # 流式终端
-│   ├── memory.py                # 记忆/会话
+│   ├── skills.py                # 技能系统
 │   ├── config.py                # 配置加载
-│   └── skills.py                # 技能系统
+│   └── main.py                  # CLI 入口
 │
-├── src/                         # TypeScript 包
-│   ├── core/                    # 核心引擎
-│   ├── tools/                   # 工具模块 (7 文件)
-│   └── cli/                     # CLI 入口
-│
-├── cortex_workspace/            # 运行时工作区
+├── dist/                        # 编译产物 (npm 发布)
+├── bin/                         # CLI 入口脚本
+├── .cortx/                      # 项目配置 + skills (gitignored)
 ├── CORTEX.md                    # 项目知识库
+├── PUBLISH.md                   # 发布指南
 ├── pyproject.toml               # Python 包配置
 ├── package.json                 # npm 包配置
-├── tsconfig.json                # TypeScript 配置
-└── PUBLISH.md                   # 发布指南
+└── tsconfig.json                # TypeScript 配置
 ```
-
-> 💡 **想看 Agent 能做什么？** 查看 [Demo 项目展示](#-agent-自主开发-demo) 或直接访问 [cortx-demo-shop-app](https://github.com/CHNAICORP/cortx-demo-shop-app)
-
----
-
-## 43 个工具
-
-| 分类 | 工具 |
-|------|------|
-| **文件** | `list_directory` `read_file` `write_file` `edit_file` `glob` `grep` `diff_files` `file_ops` `read_json` `csv_query` |
-| **执行** | `run_shell_command` `run_python` `execute_sql_query` `python_lint` |
-| **网络** | `web_search` `web_fetch` `http_request` `set_proxy` `unset_proxy` `show_proxy` |
-| **记忆** | `remember_fact` `recall_fact` `forget_fact` `ask_user` |
-| **任务** | `task_create` `task_list` `task_update` |
-| **MCP** | `mcp_list_servers` `mcp_list_tools` `mcp_call_tool` `mcp_registry` `mcp_install` `mcp_quick` |
-| **浏览器** | `browser_navigate` `browser_snapshot` `browser_screenshot` |
-| **桌面** | `computer_screenshot` `computer_click` |
-| **镜像** | `pip_mirror` `npm_mirror` |
-| **RAG** | `search_knowledge` `rebuild_knowledge_index` |
-| **时间** | `get_current_time` |
 
 ---
 
@@ -183,19 +193,15 @@ ctx/
 |------|------|
 | `/help` | 显示帮助 |
 | `/context` | 上下文容量 + 缓存命中率 |
-| `/kb` | 查看知识库 CORTEX.md |
-| `/goal [目标]` | 设置/查看持久化目标 |
-| `/plan [描述]` | 进入规划模式 |
+| `/tools` | 列出所有工具 |
 | `/skills` | 列出所有技能 |
 | `/skill <name>` | 调用技能 |
 | `/mode [s\|a\|y]` | 切换权限模式 (Shift+Tab) |
 | `/model [pro]` | 切换模型 |
-| `/tools` | 列出工具 |
-| `/trace` `/audit` | 审计追踪 |
 | `/memory` | 查看记忆 |
 | `/sessions` | 列出会话 |
+| `/trace` `/audit` | 审计追踪 |
 | `@filename` | 文件引用 |
-| `/init` | 初始化项目 |
 
 ---
 

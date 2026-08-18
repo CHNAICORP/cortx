@@ -10,7 +10,7 @@
 大脑皮层 → 感知·推理·决策    Agentic Loop (Think→Guard→Act→Reflect)
 血脑屏障 → 严格过滤          PolicyEngine (完整中介·4级审计)
 海马体   → 长期记忆          Memory + Sessions (跨会话持久化)
-运动皮层 → 动作输出          43 工具 (文件/Shell/浏览器/MCP...)
+运动皮层 → 动作输出          69 工具 (文件/Shell/浏览器/MCP/技能/子代理...)
 ```
 
 **Cortex** 是 **Harness Agent** 架构范式的具体实现，如同 Ubuntu 之于 Linux。
@@ -25,7 +25,7 @@
 
 3. **Share-nothing 隔离** — 每个 Agent 实例持有独立的 work_dir / executor / observer。
 
-4. **结构性约束** — 步数上限、超时等机制是 Harness 的结构性边界。
+4. **结构性约束** — 循环检测（相同工具+参数连续 5 次自动停止）防止卡死。
 
 ## Agentic Loop
 
@@ -43,48 +43,42 @@
 | | Python | TypeScript |
 |---|--------|-----------|
 | 位置 | `python/cortex_agent/` | `src/` |
-| 工具数 | 43 | 43 |
-| 总行数 | ~3,700 | ~1,500 |
-| 安装 | `pip install` | `npm install` |
+| 工具数 | 69 | 69 |
+| 安装 | `pip install cortx` | `npm install -g @chnaicorp/cortx` |
 
-## 项目结构
+## 核心扩展系统
 
-```
-python/cortex_agent/          # Python 包
-├── cortex_agent.py  (740行)  — Agentic Loop 核心引擎
-├── policy.py        (240行)  — PolicyEngine 安全策略
-├── llm.py           (184行)  — LLM Provider
-├── tools.py         (581行)  — 核心工具 (25)
-├── tools_mcp.py     (460行)  — MCP 客户端 + 15 注册表
-├── tools_browser.py (260行)  — CDP WebSocket 浏览器
-├── tools_computer.py (90行)  — 桌面控制
-├── tools_network.py (227行)  — 代理/镜像
-├── tools_rag.py     (132行)  — RAG 知识检索
-├── main.py          (425行)  — CLI 入口
-├── terminal.py      (148行)  — 流式终端
-├── memory.py        (236行)  — 记忆/会话
-├── config.py        (163行)  — 配置加载
-└── skills.py        (225行)  — 技能系统
+### 技能系统 (Skills)
+- 7 个内置技能 + `.cortx/skills/` 下的自定义技能
+- `list_skills` / `use_skill` / `skill_install` / `skill_remove`
+- 从 GitHub 安装：`skill_install(source="owner/repo")`
 
-src/                          # TypeScript 包
-├── core/                     — 核心引擎 (types/registry/policy/llm/loop)
-├── tools/                    — 工具模块 (file/net/exec/memory/mcp/browser/proxy)
-└── cli/                      — CLI 入口
+### 子代理 (Subagents)
+- `spawn_subagent` — 单个子代理（支持工具过滤 + 技能预加载）
+- `spawn_subagents` — 并行 fan-out（Promise.all / ThreadPoolExecutor）
+- 上下文隔离，返回结果摘要
 
-cortex_workspace/             — Agent 运行时工作区
-.cortx/                      — 项目配置 (settings.json + skills/)
-```
+### MCP 服务器（预配置）
+- **chrome-devtools** — 29 个浏览器工具（npx 自动下载）
+- **cua-driver** — 55 个桌面控制工具（原生二进制）
+- `mcp_session_start` / `mcp_session_call` / `mcp_session_stop` 持久化会话
 
-## 43 个工具
+### 上下文管理
+- `max_result_chars: 50000` — 工具结果截断上限
+- `compress_threshold: 6000` — 压缩阈值（4x 提升）
+- `max_steps: 0` — 无限步数 + 循环检测兜底
+
+## 69 个工具
 
 | 模块 | 工具 |
 |------|------|
-| `tools.py` | `list_directory` `read_file` `write_file` `edit_file` `glob` `grep` `execute_sql_query` `run_shell_command` `run_python` `get_current_time` `web_search` `web_fetch` `remember_fact` `recall_fact` `forget_fact` `ask_user` `python_lint` `task_create` `task_list` `task_update` `diff_files` `http_request` `file_ops` `read_json` `csv_query` |
-| `tools_mcp.py` | `mcp_list_servers` `mcp_list_tools` `mcp_call_tool` `mcp_registry` `mcp_install` `mcp_quick` |
+| `tools.py` | `list_directory` `read_file` `write_file` `edit_file` `glob` `grep` `execute_sql_query` `run_shell_command` `run_python` `get_current_time` `web_search` `web_fetch` `remember_fact` `recall_fact` `forget_fact` `ask_user` `python_lint` `task_create` `task_list` `task_update` `diff_files` `http_request` `file_ops` `read_json` `csv_query` `list_tools` `run_background_command` `check_server_status` `stop_background_process` `list_background_processes` `spawn_subagent` `spawn_subagents` `list_skills` `use_skill` `skill_install` `skill_remove` `git_status` `git_diff` `git_commit` `git_branch` `git_log` |
+| `tools_mcp.py` | `mcp_list_servers` `mcp_list_tools` `mcp_call_tool` `mcp_registry` `mcp_install` `mcp_quick` `mcp_session_start` `mcp_session_call` `mcp_session_list_tools` `mcp_session_stop` |
 | `tools_browser.py` | `browser_navigate` `browser_snapshot` `browser_screenshot` |
 | `tools_computer.py` | `computer_screenshot` `computer_click` |
 | `tools_network.py` | `set_proxy` `unset_proxy` `show_proxy` `pip_mirror` `npm_mirror` |
 | `tools_rag.py` | `search_knowledge` `rebuild_knowledge_index` |
+| `tools_office.py` | `office_create` `office_send` `office_batch` `office_view` `office_cli` `office_install` |
 
 ## 安全机制
 
@@ -93,7 +87,8 @@ cortex_workspace/             — Agent 运行时工作区
 - **SQL 注入防护**: 词边界正则 + 仅 SELECT + 游标级行数限制
 - **Python 沙箱**: 子进程隔离 + 16 条逃逸检测规则
 - **路径穿越防护**: 工作目录归一化 + 所有路径参数名检测
-- **自适应熔断**: 同一 capability 连续 3 次违规 → 自动暂停
+- **自适应熔断**: 同一 capability 连续 5 次违规 → 自动暂停
+- **循环检测**: 相同工具+参数连续 5 次调用 → 自动停止
 - **share-nothing 实例隔离**: 多 Agent 并行不串扰
 
 ## 用法
@@ -108,9 +103,8 @@ npm install -g @chnaicorp/cortx
 ctx --model pro
 
 # REPL 命令
-/help     /context   /kb        /goal     /plan
-/skills   /skill     /mode      /model    /tools
-/trace    /audit     /memory    /sessions  /reset
+/help     /context   /tools     /skills   /skill
+/mode     /model     /memory    /sessions  /trace
 ```
 
 ## 库使用
