@@ -633,31 +633,37 @@ async function main(): Promise<void> {
     { cmd: "/goal ", desc: "设置目标" },
     { cmd: "/plan ", desc: "规划模式" },
     { cmd: "/hooks", desc: "钩子管理" },
+    { cmd: "/subagents", desc: "查看子代理结果" },
+    { cmd: "/subagent ", desc: "查看子代理详情 <id>" },
     { cmd: "/exit", desc: "退出" },
   ];
 
   // 自动补全提示渲染状态
   let _hintLines = 0;
+  let _hintSelected = 0;
+  let _hintItems: { text: string; completion: string }[] = [];
   const CY = "\x1b[36m", GR = "\x1b[90m", YL = "\x1b[33m", RST = "\x1b[0m";
+  const HL = "\x1b[7m"; // 反色高亮
 
   function clearHint() {
     if (_hintLines > 0) {
       for (let i = 0; i < _hintLines; i++) process.stdout.write(`\x1b[B\x1b[2K`);
       for (let i = 0; i < _hintLines; i++) process.stdout.write(`\x1b[A`);
       _hintLines = 0;
+      _hintItems = [];
+      _hintSelected = 0;
     }
   }
 
-  function renderHint(line: string) {
-    clearHint();
-    let hints: string[] = [];
+  function computeHints(line: string): { text: string; completion: string }[] {
     if (line.startsWith("/")) {
-      const matches = SLASH_COMMANDS.filter(c => {
-        const cmd = c.cmd.trim();
-        return cmd.startsWith(line.trim()) || (line.trim().length > 1 && cmd.startsWith(line.trim()));
-      });
-      hints = matches.slice(0, 7).map(c => `  ${CY}${c.cmd.trim()}${RST} ${GR}${c.desc}${RST}`);
-    } else if (line.includes("@")) {
+      const matches = SLASH_COMMANDS.filter(c => c.cmd.trim().startsWith(line.trim()));
+      return matches.slice(0, 7).map(c => ({
+        text: `  ${CY}${c.cmd.trim()}${RST} ${GR}${c.desc}${RST}`,
+        completion: c.cmd.trim() + (c.cmd.endsWith(" ") ? "" : " "),
+      }));
+    }
+    if (line.includes("@")) {
       const atIdx = line.lastIndexOf("@");
       const prefix = line.slice(atIdx + 1).split(/\s/)[0];
       try {
@@ -667,13 +673,61 @@ async function main(): Promise<void> {
         const files = fs.readdirSync(searchDir)
           .filter(f => f.startsWith(filePrefix) && !f.startsWith("."))
           .slice(0, 7);
-        hints = files.map(f => `  ${YL}@${dir === "." ? "" : dir + "/"}${f}${RST}`);
+        return files.map(f => {
+          const full = (dir === "." ? "" : dir + "/") + f;
+          return {
+            text: `  ${YL}@${full}${RST}`,
+            completion: line.slice(0, atIdx + 1) + full + " ",
+          };
+        });
       } catch {}
     }
-    if (hints.length > 0) {
-      process.stdout.write("\x1b[s\n" + hints.join("\n") + "\x1b[u");
-      _hintLines = hints.length + 1;
+    return [];
+  }
+
+  function renderHint(line: string) {
+    clearHint();
+    _hintItems = computeHints(line);
+    if (_hintSelected >= _hintItems.length) _hintSelected = 0;
+    if (_hintItems.length > 0) {
+      const lines = _hintItems.map((item, i) => {
+        if (i === _hintSelected) {
+          // 选中项：加 ► 前缀 + 反色
+          return `  ${HL}► ${item.text.replace(/^  /, "")}${RST}`;
+        }
+        return `    ${item.text.replace(/^  /, "")}`;
+      });
+      process.stdout.write("\x1b[s\n" + lines.join("\n") + "\x1b[u");
+      _hintLines = _hintItems.length + 1;
     }
+  }
+
+  function reselectHint(dir: "up" | "down") {
+    if (_hintItems.length === 0) return;
+    if (dir === "up") _hintSelected = (_hintSelected - 1 + _hintItems.length) % _hintItems.length;
+    else _hintSelected = (_hintSelected + 1) % _hintItems.length;
+    // 重绘提示（不清除 items，只重绘）
+    if (_hintLines > 0) {
+      for (let i = 0; i < _hintLines; i++) process.stdout.write(`\x1b[B\x1b[2K`);
+      for (let i = 0; i < _hintLines; i++) process.stdout.write(`\x1b[A`);
+      const lines = _hintItems.map((item, i) => {
+        if (i === _hintSelected) return `  ${HL}► ${item.text.replace(/^  /, "")}${RST}`;
+        return `    ${item.text.replace(/^  /, "")}`;
+      });
+      process.stdout.write("\x1b[s\n" + lines.join("\n") + "\x1b[u");
+    }
+  }
+
+  function acceptHint(): boolean {
+    if (_hintItems.length > 0 && _hintSelected < _hintItems.length) {
+      const completion = _hintItems[_hintSelected].completion;
+      clearHint();
+      // 替换 readline 的当前行
+      rl.write("", { ctrl: true, name: "u" }); // 清除当前行
+      rl.write(completion);
+      return true;
+    }
+    return false;
   }
 
   const rl = readline.createInterface({
@@ -720,6 +774,7 @@ async function main(): Promise<void> {
 
   // Shift+Tab to cycle permission mode + live autocomplete hints
   process.stdin.on("keypress", (_str: string, key: any) => {
+    // Shift+Tab: 切换权限模式
     if (key && key.name === "tab" && key.shift) {
       const modes = ["standard", "auto", "yolo"];
       const idx = modes.indexOf(agent.config.permissionMode);
@@ -729,15 +784,36 @@ async function main(): Promise<void> {
       rl.prompt();
       return;
     }
-    // 实时自动补全提示（输入 / 或 @ 时显示下拉）
+    // 方向键导航提示列表
+    if (_hintLines > 0 && key) {
+      if (key.name === "up" || (key.name === "p" && key.ctrl)) {
+        reselectHint("up");
+        return;
+      }
+      if (key.name === "down" || (key.name === "n" && key.ctrl)) {
+        reselectHint("down");
+        return;
+      }
+      // Tab: 接受选中项
+      if (key.name === "tab") {
+        if (acceptHint()) return;
+      }
+      // Escape: 清除提示
+      if (key.name === "escape") {
+        clearHint();
+        return;
+      }
+    }
+    // Enter: 清除提示
     if (key && (key.name === "return" || key.sequence === "\r")) {
       clearHint();
       return;
     }
-    // 延迟一帧让 readline 更新 rl.line
+    // 延迟一帧让 readline 更新 rl.line，然后渲染提示
     setImmediate(() => {
       const line = rl.line || "";
       if (line.startsWith("/") || line.includes("@")) {
+        _hintSelected = 0; // 输入变化时重置选中
         renderHint(line);
       } else {
         clearHint();
@@ -787,6 +863,9 @@ async function main(): Promise<void> {
       console.log(`  \x1b[36m═══ 快捷操作 ═══\x1b[0m`);
       console.log(`  \x1b[36m@filename\x1b[0m       引用文件内容到上下文`);
       console.log(`  \x1b[36m/q, /exit\x1b[0m       退出`);
+      console.log(`  \x1b[36m═══ 子代理 ═══\x1b[0m`);
+      console.log(`  \x1b[36m/subagents\x1b[0m     查看子代理结果摘要`);
+      console.log(`  \x1b[36m/subagent <id>\x1b[0m  查看子代理完整输出`);
       console.log(`  \x1b[36m═══ 钩子 ═══\x1b[0m`);
       console.log(`  \x1b[36m/hooks\x1b[0m         查看/启停生命周期钩子`);
       showPrompt(); rl.prompt(); continue;
@@ -1021,6 +1100,54 @@ const cs = agent.cacheStats;
           }
         }
         console.log(`\n用法: /skill <name>  调用技能`);
+      }
+      showPrompt(); rl.prompt(); continue;
+    }
+    // ── /subagents — 列出子代理结果 ──
+    if (q === "/subagents" || q === "/sub") {
+      const results = agent.subagentResults;
+      if (!results.length) {
+        console.log("(无子代理记录 — 派遣子代理后可在此查看结果)");
+      } else {
+        console.log(`\x1b[36m子代理记录 (${results.length} 个):\x1b[0m\n`);
+        for (const r of results) {
+          const icon = r.success ? "\x1b[32m✓\x1b[0m" : "\x1b[31m✗\x1b[0m";
+          const time = `${(r.latencyMs / 1000).toFixed(1)}s`;
+          const task = r.task.slice(0, 40);
+          const preview = r.answerPreview.replace(/\n/g, " ").trim().slice(0, 60);
+          console.log(`  \x1b[36m#${r.id}\x1b[0m ${icon} \x1b[90m[${time}]\x1b[0m ${task}`);
+          if (r.skill) console.log(`       \x1b[33mskill:\x1b[0m ${r.skill}`);
+          if (r.toolCalls.length) console.log(`       \x1b[90m工具调用: ${r.toolCalls.length} 次\x1b[0m`);
+          if (preview) console.log(`       \x1b[90m${preview}\x1b[0m`);
+        }
+        console.log(`\n用 \x1b[36m/subagent <id>\x1b[0m 查看完整输出`);
+      }
+      showPrompt(); rl.prompt(); continue;
+    }
+    // ── /subagent <id> — 查看子代理详情 ──
+    if (q.startsWith("/subagent ") || q.startsWith("/sub ")) {
+      const sid = parseInt(q.split(" ")[1]);
+      const results = agent.subagentResults;
+      const r = results.find(x => x.id === sid);
+      if (!r) {
+        console.log(`(x) 子代理 #${sid} 不存在。用 /subagents 查看列表`);
+      } else {
+        console.log(`\x1b[36m═══ 子代理 #${r.id} ═══\x1b[0m`);
+        console.log(`  任务: ${r.task}`);
+        if (r.skill) console.log(`  技能: ${r.skill}`);
+        if (r.tools) console.log(`  工具: ${r.tools}`);
+        console.log(`  状态: ${r.success ? "✓ 成功" : "✗ 失败"}  耗时: ${(r.latencyMs / 1000).toFixed(1)}s`);
+        console.log(`  工具调用: ${r.toolCalls.length} 次`);
+        if (r.toolCalls.length) {
+          console.log(`\n\x1b[90m── 工具调用历史 ──\x1b[0m`);
+          for (const tc of r.toolCalls) {
+            const tcIcon = tc.success ? "\x1b[32m✓\x1b[0m" : "\x1b[31m✗\x1b[0m";
+            const tcPreview = tc.result.replace(/\n/g, " ").trim().slice(0, 80);
+            console.log(`  ${tcIcon} \x1b[36m${tc.name}\x1b[0m \x1b[90m[${tc.latencyMs.toFixed(0)}ms]\x1b[0m ${tcPreview}`);
+          }
+        }
+        console.log(`\n\x1b[90m── 完整输出 ──\x1b[0m`);
+        console.log(r.result);
       }
       showPrompt(); rl.prompt(); continue;
     }

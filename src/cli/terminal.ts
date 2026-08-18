@@ -295,3 +295,84 @@ function fmtArgs(args: Record<string, unknown>): string {
   }
   return parts.join(", ");
 }
+
+// ══════════════════════════════════════════════════════════════
+// SubagentTerminal — 子代理内联流式显示终端
+// 参考 Codex CLI 的内联树状行设计：每行带 [子代理 N/M] 前缀
+// ══════════════════════════════════════════════════════════════
+
+export interface SubagentToolCall {
+  name: string;
+  args: Record<string, unknown>;
+  result: string;
+  success: boolean;
+  latencyMs: number;
+}
+
+export class SubagentTerminal {
+  private prefix: string;
+  private toolCalls: SubagentToolCall[] = [];
+  private step = 0;
+  private answerFull = "";
+
+  constructor(idx: number, total: number, task: string) {
+    const label = task.length > 40 ? task.slice(0, 37) + "..." : task;
+    this.prefix = `  ${Terminal.GRAY}  └ [${idx}/${total}]${Terminal.RESET}`;
+    process.stdout.write(`${this.prefix} ${Terminal.DIM}▶ ${label}${Terminal.RESET}\n`);
+  }
+
+  write(s: string) { process.stdout.write(s); }
+
+  thinkToken(token: string) { /* 子代理思考不流式显示，避免刷屏 */ }
+
+  answerToken(token: string) {
+    this.answerFull += token;
+  }
+
+  closeThinking() { /* no-op */ }
+  isAnswerShown() { return true; }
+  writeAnswer(text: string) { this.answerFull = text; }
+  setCodeStream(_e: boolean) { /* no-op */ }
+  async codeStream(_p: string, _c: string) { /* no-op */ }
+  nextRound() { /* no-op */ }
+
+  toolStart(name: string, args: Record<string, unknown>) {
+    this.step++;
+    const argsStr = fmtArgs(args);
+    process.stdout.write(`${this.prefix} ${Terminal.CYAN}▸ ${name}${Terminal.RESET} ${Terminal.DIM}(${argsStr})${Terminal.RESET}`);
+  }
+
+  toolDone(success: boolean, latencyMs: number, preview: string) {
+    const icon = success ? `${Terminal.GREEN}✓${Terminal.RESET}` : `${Terminal.RED}✗${Terminal.RESET}`;
+    const short = preview.replace(/\n/g, " ").trim().slice(0, 60);
+    process.stdout.write(` ${icon} ${Terminal.GRAY}[${latencyMs.toFixed(0)}ms]${Terminal.RESET} ${Terminal.DIM}${short}${Terminal.RESET}\n`);
+    // 记录工具调用
+    this.toolCalls.push({
+      name: "", args: {}, result: preview, success, latencyMs,
+    });
+    // 更新最后一个的工具名
+    if (this.toolCalls.length > 0) this.toolCalls[this.toolCalls.length - 1].name = "";
+  }
+
+  /** 记录工具调用详情（供 /subagent <id> 查看） */
+  recordToolCall(name: string, args: Record<string, unknown>, result: string, success: boolean, latencyMs: number) {
+    this.toolCalls.push({ name, args, result, success, latencyMs });
+  }
+
+  /** 输出最终摘要 */
+  flush() {
+    const preview = this.answerFull.replace(/\n/g, " ").trim().slice(0, 80);
+    if (preview) {
+      process.stdout.write(`${this.prefix} ${Terminal.DIM}📋 ${preview}${Terminal.RESET}\n`);
+    }
+  }
+
+  /** 获取工具调用历史 */
+  getToolCalls(): SubagentToolCall[] { return this.toolCalls; }
+
+  /** 获取完整答案 */
+  getFullAnswer(): string { return this.answerFull; }
+
+  /** 获取答案预览（用于摘要表） */
+  getAnswerPreview(): string { return this.answerFull.slice(0, 200); }
+}

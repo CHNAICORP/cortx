@@ -19,6 +19,14 @@ import { MemoryStore, SessionStore } from './memory_store.js';
 import { SkillManager } from './skills.js';
 import { HookManager } from './hooks.js';
 import { setToolContext, clearToolContext, getToolContext } from './tool_context.js';
+import { SubagentTerminal, SubagentToolCall } from '../cli/terminal.js';
+
+// Terminal color shortcuts for inline rendering
+const Terminal_DIM = "\x1b[38;5;245m";
+const Terminal_GRAY = "\x1b[38;5;240m";
+const Terminal_GREEN = "\x1b[38;5;82m";
+const Terminal_RED = "\x1b[38;5;196m";
+const Terminal_RESET = "\x1b[0m";
 export { HookManager } from './hooks.js';
 export { setToolContext, getToolContext } from './tool_context.js';
 
@@ -140,6 +148,12 @@ const DEFAULT_SYSTEM = [
   "",
   "主动派遣时机：任务涉及 3+ 个独立模块分析、需要多维度审查（安全+性能+测试）、或用户要求「全面/多维度」分析时，",
   "主动用 spawn_subagents 并行拆分。单文件简单审查则直接做，不必派遣。",
+  "",
+  "派遣数量建议（根据任务复杂度）：",
+  "  - 1 个：单文件审查、简单研究任务",
+  "  - 2-3 个：多维度分析（安全+质量+测试）、多文件对比",
+  "  - 4+ 个：大规模项目分析（按模块拆分，每模块一个子代理）",
+  "判断依据：任务涉及的独立维度数、文件数、预计工具调用次数。宁多不少，并行更快。",
   "",
   "== MCP 服务器（预配置）==",
   "你预装了以下 MCP 服务器，通过 mcp_session_start 启动持久化会话即可使用其工具方法：",
@@ -500,6 +514,18 @@ export class ToolExecutor {
 // Cortex Agent
 // ════════════════════════════════════════════
 
+export interface SubagentResult {
+  id: number;
+  task: string;
+  skill?: string;
+  tools?: string;
+  success: boolean;
+  latencyMs: number;
+  result: string;
+  toolCalls: SubagentToolCall[];
+  answerPreview: string;
+}
+
 export class CortexAgent {
   config: AgentConfig;
   private policy: PolicyEngine;
@@ -515,6 +541,8 @@ export class CortexAgent {
   private _screenshotStreak = 0;
   private _lastToolSig = "";
   private _repeatCount = 0;
+  private _subagentResults: SubagentResult[] = [];
+  private _subagentIdCounter = 1;
   private permissionDecisions = new Map<string, boolean>();
   private sessionId: string | null = null;
   private queryCount = 0;
@@ -584,8 +612,9 @@ this._skillMgr = new SkillManager(this.config.workDir);
     this._setupToolContext();
   }
 
-  /** 创建并运行单个子代理（不含进度显示，供 spawnSubagent / spawnSubagents 复用） */
-  private async _runSubagent(task: string, model?: string, tools?: string, skill?: string): Promise<string> {
+  /** 创建并运行单个子代理（含内联流式显示 + 结果存储） */
+  private async _runSubagent(task: string, model?: string, tools?: string, skill?: string,
+                              idx?: number, total?: number): Promise<string> {
     // 预加载技能：将技能 prompt 前置注入任务
     let effectiveTask = task;
     if (skill && this._skillMgr) {
@@ -610,8 +639,32 @@ this._skillMgr = new SkillManager(this.config.workDir);
       subAgent._allowedTools = this._allowedTools;
       subAgent._disallowedTools = this._disallowedTools;
     }
+    // 设置子代理终端（内联流式显示）
+    let subTerm: SubagentTerminal | null = null;
+    if (this.term && idx != null && total != null) {
+      const label = skill ? `[${skill}] ${task}` : task;
+      subTerm = new SubagentTerminal(idx, total, label);
+      subAgent.setTerm(subTerm as any);
+    }
     subAgent._setupToolContext();
-    return await subAgent.run(effectiveTask);
+    let result = await subAgent.run(effectiveTask);
+    // run() 在 term 存在时返回 ""，从 SubagentTerminal 获取完整答案
+    if (!result && subTerm) {
+      result = subTerm.getFullAnswer();
+    }
+    // 输出最终摘要
+    if (subTerm) subTerm.flush();
+    // 存储结果供 /subagent <id> 查看
+    this._subagentResults.push({
+      id: this._subagentIdCounter++,
+      task, skill, tools,
+      success: true,
+      latencyMs: 0, // 由调用方设置
+      result,
+      toolCalls: subTerm ? subTerm.getToolCalls() : [],
+      answerPreview: subTerm ? subTerm.getAnswerPreview() : result.slice(0, 200),
+    });
+    return result;
   }
 
   /** 设置工具上下文（供 ask_user, spawn_subagent 等工具使用） */
@@ -638,14 +691,12 @@ this._skillMgr = new SkillManager(this.config.workDir);
       },
       spawnSubagent: async (task: string, model?: string, tools?: string, skill?: string): Promise<string> => {
         const label = skill ? `[${skill}] ${task}` : task;
-        if (this.term) {
-          this.term.subagentDispatch?.(1);
-          this.term.subagentStart?.(1, 1, label);
-        }
         const t0 = Date.now();
         try {
-          const result = await this._runSubagent(task, model, tools, skill);
+          const result = await this._runSubagent(task, model, tools, skill, 1, 1);
           if (this.term) this.term.subagentDone?.(1, 1, true, Date.now() - t0);
+          // 更新最后一条结果的延迟
+          if (this._subagentResults.length > 0) this._subagentResults[this._subagentResults.length - 1].latencyMs = Date.now() - t0;
           return result;
         } catch (e) {
           if (this.term) this.term.subagentDone?.(1, 1, false, Date.now() - t0);
@@ -672,11 +723,12 @@ this._skillMgr = new SkillManager(this.config.workDir);
           const tl = isObj ? String((td as Record<string, unknown>).tools || "") : "";
           const sk = isObj ? String((td as Record<string, unknown>).skill || "") : "";
           const label = sk ? `[${sk}] ${t}` : t;
-          if (this.term) this.term.subagentStart?.(idx + 1, n, label);
           const t0 = Date.now();
           try {
-            const r = await this._runSubagent(t, m || undefined, tl || undefined, sk || undefined);
+            const r = await this._runSubagent(t, m || undefined, tl || undefined, sk || undefined, idx + 1, n);
             if (this.term) this.term.subagentDone?.(idx + 1, n, true, Date.now() - t0);
+            // 更新最后一条结果的延迟
+            if (this._subagentResults.length > 0) this._subagentResults[this._subagentResults.length - 1].latencyMs = Date.now() - t0;
             return [idx, r || "(子代理未返回结果)"];
           } catch (e) {
             if (this.term) this.term.subagentDone?.(idx + 1, n, false, Date.now() - t0);
@@ -703,6 +755,22 @@ this._skillMgr = new SkillManager(this.config.workDir);
           lines.push("---");
           lines.push(results[i]);
           lines.push("");
+        }
+        // 输出摘要表
+        if (this.term && n > 1) {
+          this.term.write(`\n  ${Terminal_DIM}📊 子代理结果摘要:${Terminal_RESET}\n`);
+          this.term.write(`  ${Terminal_GRAY}┌─────┬──────────────────────────┬──────┬──────────┐${Terminal_RESET}\n`);
+          this.term.write(`  ${Terminal_GRAY}│ #   │ 任务                     │ 状态 │ 耗时     │${Terminal_RESET}\n`);
+          this.term.write(`  ${Terminal_GRAY}├─────┼──────────────────────────┼──────┼──────────┤${Terminal_RESET}\n`);
+          const recent = this._subagentResults.slice(-n);
+          for (const r of recent) {
+            const taskShort = r.task.slice(0, 24).padEnd(24);
+            const status = r.success ? `${Terminal_GREEN}✓${Terminal_RESET}   ` : `${Terminal_RED}✗${Terminal_RESET}   `;
+            const time = `${(r.latencyMs / 1000).toFixed(1)}s`.padEnd(8);
+            this.term.write(`  ${Terminal_GRAY}│${Terminal_RESET} ${r.id}   ${Terminal_GRAY}│${Terminal_RESET} ${taskShort} ${Terminal_GRAY}│${Terminal_RESET} ${status} ${Terminal_GRAY}│${Terminal_RESET} ${time} ${Terminal_GRAY}│${Terminal_RESET}\n`);
+          }
+          this.term.write(`  ${Terminal_GRAY}└─────┴──────────────────────────┴──────┴──────────┘${Terminal_RESET}\n`);
+          this.term.write(`  ${Terminal_DIM}用 /subagents 查看详情${Terminal_RESET}\n`);
         }
         return lines.join("\n").trim();
       },
@@ -849,6 +917,7 @@ this._skillMgr = new SkillManager(this.config.workDir);
 
   /** @internal Public for CLI access — matches Python's skill_mgr */
   get skillMgr(): SkillManager | null { return this._skillMgr; }
+  get subagentResults(): SubagentResult[] { return this._subagentResults; }
 
   get contextLimit(): number { return this.config.contextLimit; }
   get contextMessages(): number { return this.ctx.length; }

@@ -228,7 +228,9 @@ _SLASH_CMDS = [
     ("/save", "保存会话"), ("/sessions", "列出会话"), ("/resume", "恢复会话"),
     ("/reset", "重置上下文"), ("/trace", "最后轨迹"), ("/audit", "审计轨迹"),
     ("/kb", "查看知识库"), ("/init", "初始化项目"), ("/goal", "设置目标"),
-    ("/plan", "规划模式"), ("/hooks", "钩子管理"), ("/exit", "退出"),
+    ("/plan", "规划模式"), ("/hooks", "钩子管理"),
+    ("/subagents", "查看子代理结果"), ("/subagent", "查看子代理详情 <id>"),
+    ("/exit", "退出"),
 ]
 
 
@@ -997,6 +999,52 @@ def main():
                 for s in skills:
                     print(f"    {term.CYAN}{s.name:<20s}{term.RESET} — {s.description}")
             print(f"\n用法: /skill <name>  调用技能")
+            continue
+        # ── /subagents — 查看子代理结果 ──
+        if q in ("/subagents", "/sub"):
+            results = getattr(agent, '_subagent_results', [])
+            if not results:
+                print("(无子代理记录 — 派遣子代理后可在此查看结果)")
+            else:
+                print(f"{term.CYAN}子代理记录 ({len(results)} 个):{term.RESET}\n")
+                for r in results:
+                    icon = f"{term.GREEN}✓{term.RESET}" if r.get('success') else f"{term.RED}✗{term.RESET}"
+                    time_s = f"{r.get('latency_ms', 0)/1000:.1f}s"
+                    task = r.get('task', '')[:40]
+                    preview = r.get('answer_preview', '').replace('\n', ' ').strip()[:60]
+                    print(f"  {term.CYAN}#{r['id']}{term.RESET} {icon} {term.GRAY}[{time_s}]{term.RESET} {task}")
+                    if r.get('skill'): print(f"       {term.YELLOW}skill:{term.RESET} {r['skill']}")
+                    tc = r.get('tool_calls', [])
+                    if tc: print(f"       {term.GRAY}工具调用: {len(tc)} 次{term.RESET}")
+                    if preview: print(f"       {term.GRAY}{preview}{term.RESET}")
+                print(f"\n用 {term.CYAN}/subagent <id>{term.RESET} 查看完整输出")
+            continue
+        # ── /subagent <id> — 查看子代理详情 ──
+        if q.startswith("/subagent ") or q.startswith("/sub "):
+            try: sid = int(q.split()[1])
+            except (ValueError, IndexError):
+                print("用法: /subagent <id>"); continue
+            results = getattr(agent, '_subagent_results', [])
+            r = next((x for x in results if x['id'] == sid), None)
+            if not r:
+                print(f"(x) 子代理 #{sid} 不存在。用 /subagents 查看列表")
+            else:
+                print(f"{term.CYAN}═══ 子代理 #{r['id']} ═══{term.RESET}")
+                print(f"  任务: {r.get('task', '')}")
+                if r.get('skill'): print(f"  技能: {r['skill']}")
+                if r.get('tools'): print(f"  工具: {r['tools']}")
+                status = "✓ 成功" if r.get('success') else "✗ 失败"
+                print(f"  状态: {status}  耗时: {r.get('latency_ms', 0)/1000:.1f}s")
+                tc = r.get('tool_calls', [])
+                print(f"  工具调用: {len(tc)} 次")
+                if tc:
+                    print(f"\n{term.GRAY}── 工具调用历史 ──{term.RESET}")
+                    for t in tc:
+                        ti = f"{term.GREEN}✓{term.RESET}" if t.get('success') else f"{term.RED}✗{term.RESET}"
+                        tp = t.get('result', '').replace('\n', ' ').strip()[:80]
+                        print(f"  {ti} {term.CYAN}{t.get('name', '?')}{term.RESET} {term.GRAY}[{t.get('latency_ms', 0):.0f}ms]{term.RESET} {tp}")
+                print(f"\n{term.GRAY}── 完整输出 ──{term.RESET}")
+                print(r.get('result', ''))
             continue
         # ── /skill <name> — 调用技能 ──
         if q.startswith("/skill "):

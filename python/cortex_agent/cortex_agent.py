@@ -325,6 +325,11 @@ DEFAULT_SYSTEM = (
     "独立研究任务（避免大量中间结果占用主上下文）。复杂任务优先考虑用 spawn_subagents 并行拆分。\n\n"
     "主动派遣时机：任务涉及 3+ 个独立模块分析、需要多维度审查（安全+性能+测试）、或用户要求「全面/多维度」分析时，\n"
     "主动用 spawn_subagents 并行拆分。单文件简单审查则直接做，不必派遣。\n\n"
+    "派遣数量建议（根据任务复杂度）：\n"
+    "  - 1 个：单文件审查、简单研究任务\n"
+    "  - 2-3 个：多维度分析（安全+质量+测试）、多文件对比\n"
+    "  - 4+ 个：大规模项目分析（按模块拆分，每模块一个子代理）\n"
+    "判断依据：任务涉及的独立维度数、文件数、预计工具调用次数。宁多不少，并行更快。\n\n"
     "== MCP 服务器（预配置）==\n"
     "你预装了以下 MCP 服务器，通过 mcp_session_start 启动持久化会话即可使用其工具方法：\n"
     '  - chrome-devtools: 浏览器自动化（导航/截图/点击/填表/性能分析）— mcp_session_start(session_id="cd", server_command="npx", server_args="-y chrome-devtools-mcp@latest")\n'
@@ -769,6 +774,8 @@ class CortexAgent:
         self._screenshot_streak = 0
         self._last_tool_sig = ""
         self._repeat_count = 0
+        self._subagent_results = []
+        self._subagent_id_counter = 1
         # ── Non-interactive mode (pipe/CI) ──
         self._non_interactive: bool = False
         # ── Setup tool context ──
@@ -1169,7 +1176,20 @@ class CortexAgent:
                 sub_agent._allowed_tools = self._allowed_tools
                 sub_agent._disallowed_tools = self._disallowed_tools
             sub_agent._setup_tool_context()
-            return sub_agent.run(task)
+            import time as _st
+            _t0 = _st.time()
+            _result = sub_agent.run(task)
+            _latency = (_st.time() - _t0) * 1000
+            # 存储结果供 /subagent <id> 查看
+            self._subagent_results.append({
+                'id': self._subagent_id_counter,
+                'task': task, 'skill': skill, 'tools': tools,
+                'success': True, 'latency_ms': _latency,
+                'result': _result, 'tool_calls': [],
+                'answer_preview': _result[:200],
+            })
+            self._subagent_id_counter += 1
+            return _result
 
         def spawn_subagents_handler(tasks_json: str) -> str:
             import json as _json
