@@ -134,7 +134,7 @@ function formatSearchResults(query: string, engine: string, results: SearchItem[
   results.forEach((r, i) => {
     out.push(`  [${i + 1}] ${r.title.slice(0, 120)}`);
     out.push(`      🔗 ${r.url}`);
-    if (r.snippet) out.push(`      ${r.snippet.slice(0, 200)}`);
+    if (r.snippet) out.push(`      ${r.snippet.slice(0, 400)}`);
     out.push("");
   });
   return out.join("\n");
@@ -169,7 +169,7 @@ registry.register(
       wsCfg = (loadSettings().web_search as Record<string, unknown>) || {};
     } catch { /* use defaults */ }
     const provider = String(wsCfg.provider || "duckduckgo");
-    const n = maxResultsArg > 0 ? maxResultsArg : Number(wsCfg.max_results || 5);
+    const n = maxResultsArg > 0 ? maxResultsArg : Number(wsCfg.max_results || 10);
     const timeout = Number(wsCfg.timeout || 10) * 1000;
     const blocked = ["bing.com", "duckduckgo.com", "google.com", "baidu.com", "csdn.net"];
 
@@ -384,7 +384,7 @@ registry.register(
     const url = String(args["url"]);
     if (!/^https?:\/\//i.test(url)) return "(x) URL 须以 http:// 或 https:// 开头";
     const maxCharsArg = Number(args["max_chars"] || 0);
-    const limit = Math.min(maxCharsArg > 0 ? maxCharsArg : 4000, 20000);
+    const limit = Math.min(maxCharsArg > 0 ? maxCharsArg : 8000, 20000);
 
     // ── 检查缓存 ──
     const cacheKey = `${url}|${limit}`;

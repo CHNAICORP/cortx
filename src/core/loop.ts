@@ -126,6 +126,15 @@ const DEFAULT_SYSTEM = [
   "联网搜索或查询实时信息前，先调用 get_current_time 获取当前时间以确保时效性。",
   "搜索时务必将获取到的具体年份和月份直接写入搜索关键词中。",
   "",
+  "== 联网搜索策略 ==",
+  "联网搜索不限制次数，根据信息充分程度自主决定何时停止：",
+  "  - 每次搜索后评估：当前信息是否足以回答用户问题？",
+  "  - 信息不足时：换关键词再搜，或用 web_fetch 读取全文获取细节",
+  "  - 信息充分时：立即停止搜索，开始分析和回答",
+  "  - 搜索广泛话题时：增加 max_results（如 10-15）获取更多结果",
+  "  - 需要深入细节时：用 web_fetch 读取完整页面（max_chars=8000+）",
+  "不要为了多搜几次而搜索——每次搜索都应有明确目的，拿到足够信息立即停止。",
+  "",
   "== 技能系统 (Skills) ==",
   "你拥有技能系统。技能是可复用的专家级指引模板，能为特定任务提供专业方法论（如代码审查、PPT 制作、Office 文档处理、安全审计等）。",
   "  - 调用 list_skills() 查看所有可用技能（内置 + 项目 .cortx/skills/ 下的自定义技能）",
@@ -154,6 +163,7 @@ const DEFAULT_SYSTEM = [
   "  - 2-3 个：多维度分析（安全+质量+测试）、多文件对比",
   "  - 4+ 个：大规模项目分析（按模块拆分，每模块一个子代理）",
   "判断依据：任务涉及的独立维度数、文件数、预计工具调用次数。宁多不少，并行更快。",
+  "子代理拥有无限步数，自主决定何时完成任务。任务即将完成时主动总结并返回结果。",
   "",
   "== MCP 服务器（预配置）==",
   "你预装了以下 MCP 服务器，通过 mcp_session_start 启动持久化会话即可使用其工具方法：",
@@ -626,7 +636,7 @@ this._skillMgr = new SkillManager(this.config.workDir);
     const subConfig: Partial<AgentConfig> = {
       ...this.config,
       model: model ? LLMProvider.resolve(model) : this.config.model,
-      maxSteps: 20,
+      maxSteps: 0,
       maxRounds: 1,
     };
     const subAgent = new CortexAgent(subConfig);

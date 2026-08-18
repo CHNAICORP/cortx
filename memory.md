@@ -12,3 +12,19 @@
 - 查询: 用 spawn_subagents 并行派遣2个子代理：1回答3+3，2回答4+4
 - 查询: 计算 4+4 等于几，直接返回答案数字，不要调用任何工具
 - 查询: 计算 3+3 等于几，直接返回答案数字，不要调用任何工具
+- 查询: 联网搜索"2026年AI最新进展"（搜索时用 web_search，可加 max_results 获取更多结果），然后选择其中一个结果页面用 web_fetch
+- 搜索到: 2026年AI大模型发展现状：技术突破与产业格局全景分析
+- 搜索到: 2026年大事、要事、重要节日一览表（附放假安排）
+- 抓取: https://iaipie.com/ai-large-model-latest-progress-2026-may/
+- 查询: 联网搜索"Python 3.13新特性"，总结 Python 3.13 版本的主要新特性，包括：性能提升、新语法特性（如类型参数默认值 PEP 696）、JIT
+- 搜索到: What&#x27;s New In Python 3.13 — Python 3.14.7 documentation
+- 搜索到: Welcome to Python.org
+- 抓取: https://docs.python.org/zh-cn/3.13/whatsnew/3.13.html
+- 抓取: https://blog.axiaoxin.com/post/whats-new-in-python-3.13/
+- 抓取: https://docs.python.org/3/whatsnew/3.13.html
+- 抓取: https://juejin.cn/post/7423261843933544486
+- 抓取: https://docs.pythonlang.cn/3/whatsnew/3.13.html
+- 搜索到: Python 3.13 性能提升实测：这5个新特性让你的代码提速50%!
+- 抓取: https://blog.51cto.com/itchenhan/14088440
+- 抓取: https://juejin.cn/post/7436563499109335076
+- 查询: 用 spawn_subagents 并行派遣2个子代理：1搜索"2026年AI最新进展"并用web_fetch读取一个结果页面；2搜索"Python 3.13新

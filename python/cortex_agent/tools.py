@@ -646,7 +646,7 @@ def _format_search_results(query: str, engine: str, results: list) -> str:
     for i, r in enumerate(results, 1):
         title = r.get("title", "")[:120]
         url = r.get("url", "")
-        snippet = r.get("snippet", "")[:200]
+        snippet = r.get("snippet", "")[:400]
         out.append(f"  [{i}] {title}")
         out.append(f"      🔗 {url}")
         if snippet:
@@ -677,7 +677,7 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
     # ── 解析参数 ──
     cfg = _load_web_search_config()
     provider = cfg.get("provider", "duckduckgo")
-    n = int(max_results) if max_results and int(max_results) > 0 else int(cfg.get("max_results", 5))
+    n = int(max_results) if max_results and int(max_results) > 0 else int(cfg.get("max_results", 10))
     timeout = int(cfg.get("timeout", 10))
     opener = _build_opener()
     encoded = urllib.parse.quote(query)
@@ -926,7 +926,7 @@ def _html_to_readable(html: str) -> str:
     "抓取网页全文并提取可读文本。适合读取 web_search 找到的具体页面。\n"
     "参数:\n"
     "  url       目标网址 (必填，须以 http:// 或 https:// 开头)\n"
-    "  max_chars 最大返回字符数 (可选，默认 4000，最大 20000)\n"
+    "  max_chars 最大返回字符数 (可选，默认 8000，最大 20000)\n"
     "用法: web_fetch(url=\"https://docs.python.org/3/whatsnew/3.13.html\")\n"
     "      web_fetch(url=\"https://long-article.com\", max_chars=8000)",
     risk=RiskLevel.SAFE, capability=Capability.NET_HTTP)
@@ -937,7 +937,7 @@ def web_fetch(work_dir: str, url: str, max_chars: int = 0) -> str:
     if not ok:
         return f"(x) {reason}"
 
-    limit = min(int(max_chars) if max_chars and int(max_chars) > 0 else 4000, 20000)
+    limit = min(int(max_chars) if max_chars and int(max_chars) > 0 else 8000, 20000)
 
     # ── 检查缓存 ──
     import time as _time
