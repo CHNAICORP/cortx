@@ -68,3 +68,8 @@
 - 搜索到: Revisiting the SpaceX Valuation: A Post-Prospectus Update!
 - 抓取: https://www.cnbc.com/2026/08/10/spacex-spcx-stock-ipo-price.html
 - 查询: 派遣2个子代理并行调研：1.特斯拉最新股价 2.SpaceX最新估值。各搜一次即可。
+- 搜索到: SpaceX | Space
+- 抓取: https://www.marketbeat.com/stocks/NASDAQ/SPCX
+- 搜索到: Electric Cars, Solar & Clean Energy | Tesla
+- 抓取: https://www.nasdaq.com/market-activity/stocks/tsla
+- 查询: 用 spawn_subagents 派遣2个子代理，限定工具为 web_search,web_fetch：1.搜索TSLA股价 2.搜索SpaceX估值。各搜一

@@ -644,9 +644,22 @@ this._skillMgr = new SkillManager(this.config.workDir);
     subAgent._hooks = this._hooks;
     if (tools) {
       const toolsList = tools.split(",").map(t => t.trim()).filter(Boolean);
+      // 始终允许子代理自身派遣子代理 + 基础工具
+      const ESSENTIAL = ["spawn_subagent", "spawn_subagents", "list_tools", "get_current_time"];
+      for (const e of ESSENTIAL) { if (!toolsList.includes(e)) toolsList.push(e); }
       subAgent.setToolFilter(toolsList, null);
     } else {
-      subAgent._allowedTools = this._allowedTools;
+      // 继承父代理白名单时，确保子代理工具也在白名单中
+      if (this._allowedTools) {
+        const inherited = new Set(this._allowedTools);
+        inherited.add("spawn_subagent");
+        inherited.add("spawn_subagents");
+        inherited.add("list_tools");
+        inherited.add("get_current_time");
+        subAgent._allowedTools = inherited;
+      } else {
+        subAgent._allowedTools = null;
+      }
       subAgent._disallowedTools = this._disallowedTools;
     }
     // 设置子代理终端（内联流式显示）

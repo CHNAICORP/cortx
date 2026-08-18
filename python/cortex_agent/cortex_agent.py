@@ -1180,9 +1180,20 @@ class CortexAgent:
             # 工具过滤：指定 tools 则限制子代理只能用这些工具
             if tools:
                 tools_list = [t.strip() for t in tools.split(",") if t.strip()]
+                # 始终允许子代理自身派遣子代理 + 基础工具
+                _ESSENTIAL = ["spawn_subagent", "spawn_subagents", "list_tools", "get_current_time"]
+                for e in _ESSENTIAL:
+                    if e not in tools_list:
+                        tools_list.append(e)
                 sub_agent.set_tool_filter(allowed=tools_list)
             else:
-                sub_agent._allowed_tools = self._allowed_tools
+                # 继承父代理白名单时，确保子代理工具也在白名单中
+                if self._allowed_tools:
+                    inherited = set(self._allowed_tools)
+                    inherited.update(["spawn_subagent", "spawn_subagents", "list_tools", "get_current_time"])
+                    sub_agent._allowed_tools = inherited
+                else:
+                    sub_agent._allowed_tools = None
                 sub_agent._disallowed_tools = self._disallowed_tools
             sub_agent._setup_tool_context()
             import time as _st
