@@ -29,6 +29,143 @@ from . import tools_office as _
 del _
 
 
+def _select_list(title: str, items: list):
+    """方向键列表选择（↑↓·Enter·ESC）。返回选中索引；ESC 返回 None。"""
+    import sys as _sys
+    sel = 0
+    hint = f"  {term.GRAY}↑↓ 选择 · Enter 确定 · ESC 取消{term.RESET}"
+    def render():
+        print(title)
+        for i, it in enumerate(items):
+            line = f"  {it}"
+            if i == sel:
+                print("\x1b[7m" + line + "\x1b[0m")
+            else:
+                print(line)
+        # 结束光标位置与 redraw 一致（提示行尾、无换行），避免上移锚点错位重复渲染
+        _sys.stdout.write(hint)
+        _sys.stdout.flush()
+    def redraw():
+        # 锚点：光标在提示行尾。上移 len(items) 到首个列表项（标题不重绘），重写 items+hint 后光标回提示行尾，净位移 0 无漂移
+        _sys.stdout.write(f"\x1b[{len(items)}A")
+        for i, it in enumerate(items):
+            line = f"  {it}"
+            if i == sel:
+                _sys.stdout.write("\r\x1b[2K\x1b[7m" + line + "\x1b[0m\n")
+            else:
+                _sys.stdout.write("\r\x1b[2K" + line + "\n")
+        _sys.stdout.write("\r\x1b[2K" + hint)
+        _sys.stdout.flush()
+    if _sys.platform == "win32":
+        import msvcrt
+        while True:
+            ch = msvcrt.getwch()
+            if ch == "\x1b":
+                print(); return None
+            if ch in ("\r", "\n"):
+                print(); return sel
+            if ch in ("\x00", "\xe0"):  # 方向键前缀
+                k = msvcrt.getwch()
+                if k == "H":  # up
+                    sel = (sel - 1 + len(items)) % len(items); redraw()
+                elif k == "P":  # down
+                    sel = (sel + 1) % len(items); redraw()
+                continue
+            if ch == "\x03":
+                return None
+    else:
+        import termios, tty
+        fd = _sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            while True:
+                ch = _sys.stdin.read(1)
+                if ch == "\x1b":
+                    # 可能是方向键序列 \x1b[A/B
+                    nxt = _sys.stdin.read(2) if _sys.stdin.readable() else ""
+                    if nxt == "[A":
+                        sel = (sel - 1 + len(items)) % len(items); redraw(); continue
+                    if nxt == "[B":
+                        sel = (sel + 1) % len(items); redraw(); continue
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old)
+                    print(); return None
+                if ch in ("\r", "\n"):
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old)
+                    print(); return sel
+                if ch == "\x03":
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old)
+                    return None
+        finally:
+            try: termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            except Exception: pass
+
+
+
+def _ask_esc(prompt: str):
+    """输入一行；ESC 返回 None。"""
+    import sys as _sys
+    print(prompt, end="", flush=True)
+    buf = ""
+    if _sys.platform == "win32":
+        import msvcrt
+        while True:
+            ch = msvcrt.getwch()
+            if ch in ("\x1b",):  # ESC
+                print()
+                return None
+            if ch in ("\r", "\n"):
+                print()
+                return buf.strip()
+            if ch in ("\x00", "\xe0"):  # 方向键等前缀
+                msvcrt.getwch()
+                continue
+            if ch == "\x08":  # backspace
+                if buf:
+                    buf = buf[:-1]
+                    print("\b \b", end="", flush=True)
+                continue
+            if ch == "\x03":  # Ctrl+C
+                print()
+                return None
+            buf += ch
+            print(ch, end="", flush=True)
+    else:
+        import termios, tty
+        fd = _sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            while True:
+                ch = _sys.stdin.read(1)
+                if ch == "\x1b":
+                    # 可能是方向键序列 \x1b[A/B/C/D —— 行内无光标移动，吞掉忽略
+                    nxt = _sys.stdin.read(2) if _sys.stdin.readable() else ""
+                    if nxt in ("[A", "[B", "[C", "[D"):
+                        continue
+                    print("\n")
+                    return None
+                if ch in ("\r", "\n"):
+                    print()
+                    return buf.strip()
+                if ch in ("\x08", "\x7f"):  # backspace / DEL
+                    if buf:
+                        buf = buf[:-1]
+                        print("\b \b", end="", flush=True)
+                    continue
+                if ch == "\x03":  # Ctrl+C
+                    print("\n")
+                    return None
+                buf += ch
+                print(ch, end="", flush=True)
+        finally:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            except Exception:
+                pass
+
+
+
 def check_mcp_runtimes(verbose: bool = False) -> list:
     """检测 MCP 运行时依赖（npx/uvx/python），返回缺失项列表。
     
@@ -305,10 +442,17 @@ _SLASH_CMDS = [
     ("/exit", "退出"),
 ]
 
+# @ 引用功能入口（与文件/文件夹一起出现在 @ 补全列表；选中注入对应能力说明）
+_AT_ENTRIES = [
+    ("browser", "🌐", "浏览器控制 — 导航/快照/截图"),
+    ("computer", "🖥", "电脑控制 — 桌面截图/鼠标点击"),
+    ("skills", "🧠", "技能列表 — 可用专家指引"),
+    ("mcp", "🔌", "MCP 服务器 — 已配置/注册表"),
+]
+
 
 def _read_input_hints(prompt: str, work_dir: str, term) -> str:
-    """读取用户输入，输入 / 或 @ 时实时显示补全提示。回退到 input() 如果 raw 模式不可用。"""
-    # 检测 raw 模式可用性
+    """读取用户输入，/ 或 @ 实时补全提示；方向键选择、Enter/Tab 确认补全（不发送）、再次 Enter 发送。"""
     try:
         import msvcrt  # noqa
         _plat = "win"
@@ -323,7 +467,9 @@ def _read_input_hints(prompt: str, work_dir: str, term) -> str:
         return input(prompt)
 
     buf = ""
-    _hint_n = [0]  # nonlocal workaround
+    _hint_n = [0]
+    _hint_items = [[]]
+    _hint_sel = [0]
 
     def _clear_hint():
         if _hint_n[0] > 0:
@@ -334,29 +480,82 @@ def _read_input_hints(prompt: str, work_dir: str, term) -> str:
             sys.stdout.flush()
             _hint_n[0] = 0
 
-    def _render_hint():
-        _clear_hint()
+    def _compute_hints():
         hints = []
         if buf.startswith("/"):
             for cmd, desc in _SLASH_CMDS:
                 if cmd.startswith(buf.rstrip()) or (len(buf) > 1 and cmd.startswith(buf)):
-                    hints.append(f"  {term.CYAN}{cmd}{term.RESET} {term.GRAY}{desc}{term.RESET}")
+                    hints.append((f"{term.CYAN}{cmd}{term.RESET} {term.GRAY}{desc}{term.RESET}", cmd + " "))
         elif "@" in buf:
             at_idx = buf.rfind("@")
             prefix = buf[at_idx + 1:]
+            for name, icon, desc in _AT_ENTRIES:
+                if name.startswith(prefix.lower()):
+                    disp = f"{icon} {term.YELLOW}@{name}{term.RESET} {term.GRAY}{desc}{term.RESET}"
+                    hints.append((disp, buf[:at_idx + 1] + name + " "))
             try:
-                files = [f for f in os.listdir(work_dir)
-                         if f.startswith(prefix) and not f.startswith(".")]
-                hints = [f"  {term.YELLOW}@{f}{term.RESET}" for f in files[:7]]
+                import posixpath as _pp
+                d = _pp.dirname(prefix) or "."
+                fp = _pp.basename(prefix)
+                search_dir = work_dir if d == "." else os.path.join(work_dir, d)
+                entries_f = [f for f in os.listdir(search_dir)
+                             if f.startswith(fp) and not f.startswith(".")][:max(0, 7 - len(hints))]
+                for f in entries_f:
+                    full = ("" if d == "." else d + "/") + f
+                    is_dir = os.path.isdir(os.path.join(search_dir, f))
+                    icon_f = "\U0001F4C1" if is_dir else "\U0001F4C4"
+                    disp = f"{icon_f} {term.YELLOW}@{full}{term.RESET}"
+                    comp = buf[:at_idx + 1] + full + ("/" if is_dir else " ")
+                    hints.append((disp, comp))
             except Exception:
                 pass
-        if hints:
-            sys.stdout.write("\x1b[s\n" + "\n".join(hints[:7]) + "\x1b[u")
+        return hints[:7]
+
+    def _hint_lines_render():
+        out = []
+        for i, (disp, _) in enumerate(_hint_items[0]):
+            if i == _hint_sel[0]:
+                out.append(f"  \x1b[7m\u25ba {disp}\x1b[0m")
+            else:
+                out.append(f"    {disp}")
+        return out
+
+    def _render_hint():
+        _clear_hint()
+        _hint_items[0] = _compute_hints()
+        if _hint_sel[0] >= len(_hint_items[0]):
+            _hint_sel[0] = 0
+        if _hint_items[0]:
+            lines_r = _hint_lines_render()
+            lines_r.append(f"  {term.GRAY}↑↓ 选择 · Tab 确认补全 · Enter 提交 · ESC 关闭{term.RESET}")
+            sys.stdout.write("\x1b[s\n" + "\n".join(lines_r) + "\n\x1b[u")
             sys.stdout.flush()
-            _hint_n[0] = min(len(hints), 7) + 1
+            _hint_n[0] = len(_hint_items[0]) + 2
+
+    def _reselect_hint(direction):
+        n = len(_hint_items[0])
+        if n == 0:
+            return
+        _hint_sel[0] = (_hint_sel[0] - 1 + n) % n if direction == "up" else (_hint_sel[0] + 1) % n
+        if _hint_n[0] > 0:
+            lines_r2 = _hint_lines_render()
+            lines_r2.append(f"  {term.GRAY}↑↓ 选择 · Tab 确认补全 · Enter 提交 · ESC 关闭{term.RESET}")
+            sys.stdout.write("\x1b[s\n" + "\n".join(lines_r2) + "\n\x1b[u")
+            sys.stdout.flush()
+
+    def _accept_hint():
+        """接受选中项补全 buf（不发送）。"""
+        if _hint_items[0] and _hint_sel[0] < len(_hint_items[0]):
+            completion = _hint_items[0][_hint_sel[0]][1]
+            _clear_hint()
+            new_buf = completion
+            sys.stdout.write("\r\x1b[2K" + prompt + new_buf)
+            sys.stdout.flush()
+            _hint_items[0] = []
+            return new_buf
+        return None
 
     def _read_one():
-        """读取一个按键，返回 (char, key_name)。"""
         if _plat == "win":
             import msvcrt
             ch = msvcrt.getwch()
@@ -364,7 +563,7 @@ def _read_input_hints(prompt: str, work_dir: str, term) -> str:
                 ch2 = msvcrt.getwch()
                 kn = {"H": "up", "P": "down"}.get(ch2, "")
                 return "", kn
-            return ch, {"\r": "return", "\n": "return", "\x03": "cancel"}.get(ch, "")
+            return ch, {"\r": "return", "\n": "return", "\x03": "cancel", "\x1b": "esc"}.get(ch, "")
         else:
             import termios, tty
             fd = sys.stdin.fileno()
@@ -376,7 +575,7 @@ def _read_input_hints(prompt: str, work_dir: str, term) -> str:
                     rest = sys.stdin.read(2)
                     kn = {"[A": "up", "[B": "down"}.get(rest, "")
                     return "", kn
-                return ch, {"\r": "return", "\n": "return", "\x03": "cancel"}.get(ch, "")
+                return ch, {"\r": "return", "\n": "return", "\x03": "cancel", "\x1b": "esc"}.get(ch, "")
             finally:
                 termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
@@ -386,48 +585,52 @@ def _read_input_hints(prompt: str, work_dir: str, term) -> str:
     while True:
         ch, key = _read_one()
 
+        # Enter：有候选 → 确认补全（目录继续会话，其他项清 hints 退出补全态继续输入）；无候选 → 提交
         if key == "return":
+            if _hint_items[0] and _hint_sel[0] < len(_hint_items[0]):
+                new_buf = _accept_hint()
+                if new_buf is not None:
+                    buf = new_buf
+                    if not new_buf.endswith("/"):
+                        _hint_items[0] = []  # 补全完成（文件/命令/功能），退出补全态
+                    else:
+                        _render_hint()      # 目录 → 继续会话展示下一级
+                continue
             _clear_hint()
             sys.stdout.write("\n")
             sys.stdout.flush()
             return buf
+        elif key == "esc":
+            _clear_hint()
+            _hint_items[0] = []
         elif key == "cancel":
             _clear_hint()
             sys.stdout.write("\n")
             raise KeyboardInterrupt
+        elif key == "up":
+            _reselect_hint("up")
+        elif key == "down":
+            _reselect_hint("down")
         elif ch in ("\x08", "\x7f"):  # Backspace
             if buf:
                 buf = buf[:-1]
                 sys.stdout.write("\b \b")
                 sys.stdout.flush()
                 _render_hint()
-        elif ch == "\t":  # Tab: 补全第一个匹配
-            if buf.startswith("/"):
-                matches = [c for c, _ in _SLASH_CMDS if c.startswith(buf)]
-                if matches:
-                    old_len = len(buf)
-                    buf = matches[0] + " "
-                    sys.stdout.write("\b" * old_len + " " * old_len + "\b" * old_len + buf)
-                    sys.stdout.flush()
+        elif ch == "\t":  # Tab: 补全选中项
+            new_buf = _accept_hint()
+            if new_buf is not None:
+                buf = new_buf
+                if not new_buf.endswith("/"):
+                    _hint_items[0] = []
+                else:
                     _render_hint()
-            elif "@" in buf:
-                at_idx = buf.rfind("@")
-                prefix = buf[at_idx + 1:]
-                try:
-                    files = [f for f in os.listdir(work_dir) if f.startswith(prefix)]
-                    if files:
-                        old_len = len(buf)
-                        buf = buf[:at_idx + 1] + files[0]
-                        sys.stdout.write("\b" * old_len + " " * old_len + "\b" * old_len + buf)
-                        sys.stdout.flush()
-                        _render_hint()
-                except Exception:
-                    pass
         elif ch and ch.isprintable():
             buf += ch
             sys.stdout.write(ch)
             sys.stdout.flush()
             _render_hint()
+
 
 
 def _read_key() -> str:
@@ -848,13 +1051,187 @@ def main():
                 print(f"    {s['function']['description']}")
             continue
         if q in ("/model", "/m"):
-            print(f"当前: {agent.model}\n可用: flash | pro"); continue
+            # 交互式选择：列出提供商（含内置未配置项，可现场添加 Key）→ 选模型 → 切换
+            # 方向键选择 + 自定义提供商（_select_list/_ask_esc 已提取为模块级）
+            try:
+                st = load_settings()
+            except Exception:
+                st = {}
+            cur = st.get("provider") or "deepseek"
+            provider_models = {}
+            for pid, pc in (st.get("providers") or {}).items():
+                provider_models[pid] = {
+                    "has_key": bool(pc.get("api_key")),
+                    "models": list((pc.get("models") or {}).keys()),
+                    "builtin": False,
+                    "base_url": pc.get("base_url", ""),
+                    "protocol": pc.get("protocol", ""),
+                }
+            # 合并内置表：已配置的补充全量模型；未配置的也列出（可现场添加 Key）
+            try:
+                from .llm import LLMProvider
+                for pid, cfg in LLMProvider.DEFAULT_PROVIDERS.items():
+                    bm = list((cfg.get("models") or {}).keys())
+                    if pid in provider_models:
+                        provider_models[pid]["models"] = list(dict.fromkeys(provider_models[pid]["models"] + bm))
+                    else:
+                        provider_models[pid] = {
+                            "has_key": False, "models": bm, "builtin": True,
+                            "base_url": cfg.get("base_url", ""), "protocol": cfg.get("protocol", ""),
+                        }
+            except Exception:
+                pass
+            print(f"当前: {cur} → {agent.model}\n")
+
+            pids = list(provider_models.keys())
+            prov_items = []
+            for pid in pids:
+                info = provider_models[pid]
+                mark = "★" if pid == cur else " "
+                if info["has_key"]:
+                    key_note = ""
+                elif info["builtin"]:
+                    key_note = f" {term.GRAY}(未配置 Key，选择后可添加){term.RESET}"
+                else:
+                    key_note = f" {term.GRAY}(未配置 Key){term.RESET}"
+                models_str = ", ".join(info["models"][:4]) + (" ..." if len(info["models"]) > 4 else "")
+                prov_items.append(f"{mark} {term.CYAN}{pid:<15}{term.RESET} {models_str}{key_note}")
+            prov_items.append(f"➕ \x1b[33m自定义提供商 (填入 API 地址和 Key)\x1b[0m")
+            prov_sel = _select_list("选择提供商:", prov_items)
+            if prov_sel is None:
+                print("(已取消)"); continue
+            # ── 自定义提供商流程 ──
+            if prov_sel == len(prov_items) - 1:
+                base_url = _ask_esc("API 地址 base_url (如 https://api.example.com/v1): ")
+                if not base_url:
+                    print("(已取消)"); continue
+                proto_sel = _select_list("选择协议:", [
+                    "openai-chat（OpenAI Chat Completion，默认）",
+                    "openai-response（OpenAI Response 协议）",
+                    "anthropic（Anthropic Message 协议）",
+                ])
+                if proto_sel is None:
+                    print("(已取消)"); continue
+                protocol = ["openai-chat", "openai-response", "anthropic"][proto_sel]
+                api_key = _ask_esc("API Key (回车=稍后配置): ")
+                if api_key is None:
+                    print("(已取消)"); continue
+                model_name = _ask_esc("模型名 (如 qwen-max / my-model): ")
+                if not model_name:
+                    print("(已取消)"); continue
+                try:
+                    import json as _json, os as _os
+                    user_path = _os.path.join(_os.path.expanduser("~"), ".cortx", "settings.json")
+                    with open(user_path, "r", encoding="utf-8") as f:
+                        data = _json.load(f)
+                    entry = {"api_key": api_key or "", "base_url": base_url,
+                             "models": {model_name: model_name}}
+                    if protocol != "openai-chat":
+                        entry["protocol"] = protocol
+                    data.setdefault("providers", {})["custom"] = entry
+                    with open(user_path, "w", encoding="utf-8") as f:
+                        _json.dump(data, f, ensure_ascii=False, indent=2)
+                    print(f"✅ 已保存自定义提供商 (custom): {base_url}")
+                    print(agent.switch_provider("custom", model_name))
+                except Exception as e:
+                    print(f"(x) 保存失败: {e}")
+                continue
+            sel_pid = pids[prov_sel]
+            sel_info = provider_models[sel_pid]
+            # 未配置 Key：进入提供商配置向导（API 地址 → Key → 选模型 → 保存切换）
+            if not sel_info["has_key"]:
+                if not sel_info["builtin"]:
+                    print(f"(x) 提供商 {sel_pid} 未配置 API Key\n请在 ~/.cortx/settings.json 的 providers.{sel_pid}.api_key 填入"); continue
+                key_urls = {
+                    "deepseek": "https://platform.deepseek.com/api_keys",
+                    "openai": "https://platform.openai.com/api-keys",
+                    "glm": "https://open.bigmodel.cn/console/apikeys",
+                    "glm-responses": "https://open.bigmodel.cn/console/apikeys",
+                    "glm-anthropic": "https://open.bigmodel.cn/console/apikeys",
+                    "anthropic": "https://console.anthropic.com/settings/keys",
+                }
+                print(f"\n{term.CYAN}══ 配置提供商 {sel_pid} ══{term.RESET}")
+                print(f"获取 Key: {key_urls.get(sel_pid, '(查阅该提供商官网)')}\n")
+                # 步骤 1：API 地址（回车=默认，可自定义 OpenAI/Anthropic 兼容地址）
+                url_input = _ask_esc(f"API 地址 (回车=默认 {sel_info['base_url']}): ")
+                if url_input is None:
+                    print("(已取消)"); continue
+                base_url = url_input or sel_info["base_url"]
+                # 协议：内置条目自带；自定义地址按规则推断
+                protocol = sel_info.get("protocol", "")
+                if url_input and not protocol:
+                    from .llm import LLMProvider as _LP
+                    protocol = _LP.infer_protocol(base_url)
+                # 步骤 2：API Key
+                new_key = _ask_esc("API Key: ")
+                if not new_key:
+                    print("(已取消，未添加)"); continue
+                # 步骤 3：选模型（方向键）
+                sel_alias_wiz = sel_info["models"][0] if sel_info["models"] else None
+                if sel_info["models"]:
+                    m_sel = _select_list(f"选择 {sel_pid} 模型:", [f"  {m}" for m in sel_info["models"]])
+                    if m_sel is None:
+                        print("(已取消)"); continue
+                    sel_alias_wiz = sel_info["models"][m_sel]
+                try:
+                    import json as _json, os as _os
+                    user_path = _os.path.join(_os.path.expanduser("~"), ".cortx", "settings.json")
+                    with open(user_path, "r", encoding="utf-8") as f:
+                        data = _json.load(f)
+                    entry = {"api_key": new_key, "base_url": base_url}
+                    if protocol:
+                        entry["protocol"] = protocol
+                    from .llm import LLMProvider
+                    bm = (LLMProvider.DEFAULT_PROVIDERS.get(sel_pid) or {}).get("models", {})
+                    entry["models"] = dict(bm)
+                    data.setdefault("providers", {})[sel_pid] = entry
+                    with open(user_path, "w", encoding="utf-8") as f:
+                        _json.dump(data, f, ensure_ascii=False, indent=2)
+                    print(f"✅ 已添加提供商 {sel_pid} ({base_url})")
+                except Exception as e:
+                    print(f"(x) 保存失败: {e}"); continue
+                if sel_alias_wiz:
+                    print(agent.switch_provider(sel_pid, sel_alias_wiz))
+                continue
+            # 二级：选模型（方向键）
+            sel_models = provider_models[sel_pid]["models"]
+            if not sel_models:
+                print("(该提供商无模型映射)"); continue
+            model_sel = _select_list(f"选择 {sel_pid} 模型:", [f"  {m}" for m in sel_models])
+            if model_sel is None:
+                print("(已取消)"); continue
+            print(agent.switch_provider(sel_pid, sel_models[model_sel]))
+            continue
         if q.startswith("/model ") or q.startswith("/m "):
-            agent.switch_model(q.split(" ",1)[1]); print(f"→ {agent.model}"); continue
+            arg = q.split(" ", 1)[1].strip()
+            if "/" in arg:
+                pid, alias = arg.split("/", 1)
+                print(agent.switch_provider(pid, alias))
+            else:
+                try:
+                    st = load_settings()
+                    is_provider = arg.lower() in (st.get("providers") or {})
+                    cur_models = (st.get("providers", {}).get(st.get("provider") or "deepseek", {}).get("models") or {})
+                except Exception:
+                    is_provider, cur_models = False, {}
+                if is_provider and arg not in cur_models:
+                    print(agent.switch_provider(arg))
+                else:
+                    agent.switch_model(arg); print(f"→ {agent.model}")
+            continue
         # ── Permission mode switching ──
         if q in ("/mode", "/permissions"):
-            m = agent.config.permission_mode
-            print(f"当前: {m}\n可用: {term.GREEN}s/standard{term.RESET} | {term.YELLOW}a/auto{term.RESET} | {term.RED}y/yolo{term.RESET}")
+            print(f"当前: {agent.config.permission_mode}")
+            print()
+            mode_sel = _select_list("切换权限模式:", [
+                f"{term.GREEN}standard{term.RESET} — 标准模式（文件操作全路径放行，SYSTEM 区内放行）",
+                f"{term.YELLOW}auto{term.RESET}    — 自动批准编辑 + SYSTEM 放行",
+                f"{term.RED}yolo{term.RESET}     — 全部放行（谨慎使用）",
+            ])
+            if mode_sel is None:
+                print("(已取消)")
+            else:
+                print(agent.switch_permission_mode(["standard", "auto", "yolo"][mode_sel]))
             continue
         if q.startswith("/mode ") or q.startswith("/permissions "):
             result = agent.switch_permission_mode(q.split(" ", 1)[1])
@@ -883,20 +1260,8 @@ def main():
         if q in ("/save", "/s"):
             sid = agent.save_session()
             print(f"会话已保存: {sid}"); continue
-        if q in ("/sessions", "/ls"):
-            if agent.sessions:
-                sessions = agent.sessions.list_sessions()
-                if not sessions:
-                    print("(无已保存的会话)")
-                else:
-                    for s in sessions:
-                        marker = " *" if s['session_id'] == agent.session_id else "  "
-                        print(f"{marker} {s['session_id'][:22]:<22} Q={s.get('query_count',0)} {s.get('last_active','')[:19]}")
-            else:
-                print("(会话系统不可用)")
-            continue
         def _do_resume(target):
-            """恢复指定会话（复用逻辑）"""
+            """恢复指定会话（/sessions 与 /resume 复用）"""
             try:
                 if agent.sessions:
                     saved_ctx, meta = agent.sessions.load(target)
@@ -912,13 +1277,30 @@ def main():
                 print(f"(x) 会话不存在: {target}")
             except Exception as e:
                 print(f"(x) 恢复失败: {e}")
+        # ── /sessions — 列出会话（方向键选择恢复）──
+        if q in ("/sessions", "/ls"):
+            if not agent.sessions:
+                print("(会话系统不可用)")
+            else:
+                sessions = agent.sessions.list_sessions()
+                if not sessions:
+                    print("(无已保存的会话)")
+                else:
+                    sess_sel = _select_list(f"会话 ({len(sessions)} 个) — 选择恢复:",
+                        [f"{s['session_id'][:20]}  Q={s.get('query_count',0)}  {s.get('last_active','')[:19]}" for s in sessions[:15]])
+                    if sess_sel is None:
+                        print("(已取消)")
+                    else:
+                        _do_resume(str(sessions[sess_sel]["session_id"]))
+            continue
         # ── /resume [id] ──  不带 id 弹出选择器（与 CLI `ctx -r` 一致）
         if q in ("/resume", "/r"):
             picked = prompt_session_resume(agent)
             if picked:
                 _do_resume(picked)
             elif picked is None:
-                print("已选择新建会话")
+                agent.init_session(resume=False)  # 真正新建会话（与 CLI `ctx -r` 选"新建"一致）
+                print(f"已新建会话: {agent.session_id or '?'}")
             continue
         if q.startswith("/resume ") or q.startswith("/r "):
             target = q.split(" ", 1)[1].strip()
@@ -935,6 +1317,23 @@ def main():
                         print(f"  {term.CYAN}{f}{term.RESET}")
             else:
                 print("(记忆系统不可用)")
+            continue
+        if q == "/forget":
+            if not agent.memory:
+                print("(记忆系统不可用)")
+            else:
+                facts = agent.memory.list_all()
+                if not facts:
+                    print("(没有记住任何事实)")
+                else:
+                    f_sel = _select_list(f"记忆条目 ({len(facts)} 个) — 选择删除:", [str(f)[:60] for f in facts[:15]])
+                    if f_sel is None:
+                        print("(已取消)")
+                    elif agent.memory.delete(facts[f_sel]):
+                        agent.governor = agent._make_governor()
+                        print(f"已忘记: {facts[f_sel]}")
+                    else:
+                        print("(x) 删除失败")
             continue
         if q.startswith("/forget "):
             name = q.split(" ", 1)[1].strip()
@@ -1064,13 +1463,22 @@ def main():
             continue
         # ── /skills — 列出技能（参考 Claude Code /skills）──
         if q in ("/skills", "/skill"):
-            cats = agent.skill_mgr.list_by_category()
-            print(f"{term.CYAN}可用技能 ({len(agent.skill_mgr.skills)} 个):{term.RESET}\n")
-            for cat, skills in sorted(cats.items()):
-                print(f"  {term.YELLOW}[{cat}]{term.RESET}")
-                for s in skills:
-                    print(f"    {term.CYAN}{s.name:<20s}{term.RESET} — {s.description}")
-            print(f"\n用法: /skill <name>  调用技能")
+            all_skills = agent.skill_mgr.list_all()
+            if not all_skills:
+                print("(无可用技能)")
+            else:
+                print(f"{term.CYAN}可用技能 ({len(all_skills)} 个){term.RESET} — 方向键选择并加载")
+                print()
+                sk_sel = _select_list("选择技能:", [f"{term.CYAN}{s.name:<18s}{term.RESET} {s.description[:40]}" for s in all_skills])
+                if sk_sel is None:
+                    print("(已取消)")
+                else:
+                    skill = all_skills[sk_sel]
+                    print(f"{term.CYAN}[技能] {skill.name}{term.RESET} — {skill.description}")
+                    try:
+                        agent.run(skill.to_prompt())
+                    except Exception as e:
+                        print(f"[ERROR] {e}")
             continue
         # ── /subagents — 查看子代理结果 ──
         if q in ("/subagents", "/sub"):
@@ -1137,6 +1545,43 @@ def main():
             # 拒绝明显的路径穿越
             if ".." in fname or fname.startswith("/") or fname.startswith("\\"):
                 print(f"(x) @引用不支持路径穿越: {fname}")
+                continue
+            # ── 功能入口：@browser / @computer / @skills / @mcp → 注入能力清单 ──
+            entry_hit = next((e for e in _AT_ENTRIES if e[0] == fname.lower()), None)
+            if entry_hit:
+                ename, eicon, edesc = entry_hit
+                if ename in ("browser", "computer"):
+                    tools_n = [s["function"]["name"] for s in registry.schemas
+                               if s["function"]["name"].startswith(ename + "_")]
+                    lines = []
+                    for n in tools_n:
+                        m = registry.meta(n)
+                        d = (m.description.split("\n")[0][:60] if m else "")
+                        lines.append(f"  • {n} — {d}")
+                    ctx_msg = (f"[{eicon} {edesc}]\n可用工具 ({len(tools_n)} 个):\n" + "\n".join(lines)
+                               + "\n\n请根据以上工具能力回答用户的问题。"
+                               + (f"\n\n{rest}" if rest else "\n\n请说明你能用这些工具做什么，并给出使用示例。"))
+                elif ename == "skills":
+                    skills = agent.skill_mgr.list_all() if agent.skill_mgr else []
+                    ctx_msg = (f"[🧠 可用技能 ({len(skills)} 个)]\n"
+                               + "\n".join(f"  • {s.name} — {s.description[:50]}" for s in skills)
+                               + "\n\n请根据以上技能列表回答。"
+                               + (f"\n\n{rest}" if rest else "\n\n请简要介绍这些技能分别适用什么场景。"))
+                else:  # mcp
+                    try:
+                        from .config import load_settings as _ls
+                        ms = (_ls().get("mcpServers") or {})
+                        cfg_lines = "\n".join(f"  • {k}" for k in ms) or "  (无)"
+                    except Exception:
+                        cfg_lines = "  (读取失败)"
+                    ctx_msg = (f"[🔌 MCP 服务器配置]\n{cfg_lines}\n\n"
+                               "用 mcp_list_servers() 查看全部（含注册表），mcp_session_start() 启动会话后调用工具。"
+                               + (f"\n\n{rest}" if rest else ""))
+                print(f"{term.GRAY}@{ename} — {edesc}{term.RESET}")
+                try:
+                    agent.run(ctx_msg)
+                except Exception as e:
+                    print(f"[ERROR] {e}")
                 continue
             matches = _glob.glob(f"**/{fname}", recursive=True) or _glob.glob(f"**/{fname}*", recursive=True)
             if matches:

@@ -13,7 +13,7 @@ import {
 } from './types.js';
 import { registry } from './registry.js';
 import { PolicyEngine } from './policy.js';
-import { LLMProvider, ParsedToolCall, resolveCapabilities } from './llm.js';
+import { LLMProvider, ParsedToolCall, resolveCapabilities, DEFAULT_PROVIDERS as DEFAULT_PROVIDERS_LLM } from './llm.js';
 export { LLMProvider } from './llm.js';
 import { MemoryStore, SessionStore } from './memory_store.js';
 import { SkillManager } from './skills.js';
@@ -601,6 +601,7 @@ this._skillMgr = new SkillManager(this.config.workDir);
       tools: toolSchemas,
       timeout: this.config.thinkTimeout,
       maxTokens: this.config.maxTokens,
+      protocol: (config as { protocol?: import("./llm.js").ProtocolKind }).protocol,
     });
     this._makeGovernor();
     this._setupToolContext();
@@ -950,6 +951,73 @@ this._skillMgr = new SkillManager(this.config.workDir);
     this.llm.updateMaxTokens(this.config.maxTokens);
     // 重建 governor 以应用新的上下文窗口
     this._makeGovernor();
+  }
+
+  /**
+   * 切换模型提供商（apiKey/baseUrl/model 全量切换）并持久化到 settings.json。
+   * @param provider 提供商 id（deepseek/openai/glm/anthropic，须在 settings.providers 中配置了 api_key）
+   * @param alias 模型别名（缺省用该提供商 models 的第一个）
+   * @returns 成功返回描述；失败返回以 (x) 开头的错误提示
+   */
+  switchProvider(provider: string, alias?: string): string {
+    const pid = provider.toLowerCase().trim();
+    // 读取 settings.json 中已配置的提供商
+    let pcfg: { api_key?: string; base_url?: string; models?: Record<string, string> } | undefined;
+    try {
+      const { loadSettings } = require("../config.js");
+      const settings = loadSettings();
+      pcfg = (settings.providers || {})[pid];
+    } catch { /* ignore */ }
+    const known = ["deepseek", "openai", "glm", "anthropic"];
+    if (!pcfg && !known.includes(pid)) {
+      return `(x) 未知提供商: ${pid}\n已知: ${known.join(", ")}（需在 settings.json providers 中配置 api_key）`;
+    }
+    if (!pcfg || !pcfg.api_key) {
+      return `(x) 提供商 ${pid} 未配置 API Key\n请在 ~/.cortx/settings.json 的 providers.${pid}.api_key 填入 Key`;
+    }
+    const models = pcfg.models || {};
+    // 别名解析两级查找：settings models 映射 → 内置 DEFAULT_PROVIDERS 全量映射（向导只写一个模型，内置表更全）
+    const builtinModels: Record<string, string> = DEFAULT_PROVIDERS_LLM[pid]?.models || {};
+    const lookup = { ...builtinModels, ...models };
+    const effectiveAlias = alias && lookup[alias] ? alias : (Object.keys(models)[0] || Object.keys(builtinModels)[0]);
+    if (!effectiveAlias) {
+      return `(x) 提供商 ${pid} 未配置 models 映射\n请在 settings.json 的 providers.${pid}.models 中定义别名 → 模型名`;
+    }
+    const modelName = lookup[effectiveAlias];
+    // 重建 LLMProvider（apiKey/baseUrl/model/protocol 全量切换；工具 schema 不变）
+    const baseUrl = pcfg.base_url || this.config.baseUrl;
+    const protocol = (pcfg as { protocol?: string }).protocol as import("./llm.js").ProtocolKind | undefined;
+    this.llm = new LLMProvider({
+      apiKey: pcfg.api_key,
+      baseUrl,
+      model: modelName,
+      tools: registry.schemaList,
+      timeout: this.config.thinkTimeout,
+      maxTokens: this.config.maxTokens,
+      protocol,
+    });
+    this.config.model = modelName;
+    this.config.apiKey = pcfg.api_key;
+    this.config.baseUrl = baseUrl;
+    // 更新能力 + governor（与 switchModel 一致）
+    const caps = resolveCapabilities(modelName);
+    this.config.contextLimit = caps.contextWindow;
+    this.config.maxTokens = caps.maxOutputTokens;
+    this.llm.updateMaxTokens(this.config.maxTokens);
+    this._makeGovernor();
+    // 持久化到 settings.json（下次启动生效）
+    try {
+      const fsMod = require("fs");
+      const pathMod = require("path");
+      const userPath = pathMod.join(require("os").homedir(), ".cortx", "settings.json");
+      if (fsMod.existsSync(userPath)) {
+        const data = JSON.parse(fsMod.readFileSync(userPath, "utf-8"));
+        data.provider = pid;
+        data.model = effectiveAlias;
+        fsMod.writeFileSync(userPath, JSON.stringify(data, null, 2), "utf-8");
+      }
+    } catch { /* 持久化失败不阻断切换 */ }
+    return `✅ 已切换 → ${pid}/${effectiveAlias} (${modelName})`;
   }
 
   switchPermissionMode(mode: string): string {

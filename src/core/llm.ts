@@ -14,6 +14,8 @@ interface LLMConfig {
   tools: FunctionSchema[];
   timeout: number;
   maxTokens: number;
+  /** 显式指定协议；缺省从 baseUrl 推断 */
+  protocol?: ProtocolKind;
 }
 
 interface ParsedToolCall {
@@ -31,9 +33,9 @@ interface LLMResponse {
   finishReason: string;
 }
 
-interface ProviderCfg { baseUrl: string; models: Record<string, string>; }
+interface ProviderCfg { baseUrl: string; models: Record<string, string>; protocol?: ProtocolKind; }
 
-const DEFAULT_PROVIDERS: Record<string, ProviderCfg> = {
+export const DEFAULT_PROVIDERS: Record<string, ProviderCfg> = {
   deepseek: {
     baseUrl: "https://api.deepseek.com/v1",
     models: { flash: "deepseek-v4-flash", pro: "deepseek-v4-pro" },
@@ -58,12 +60,29 @@ const DEFAULT_PROVIDERS: Record<string, ProviderCfg> = {
   glm: {
     baseUrl: "https://open.bigmodel.cn/api/paas/v4",
     models: {
+      "5.3":       "glm-5.3",
       "5.2":       "glm-5.2",
       "5.1":       "glm-5.1",
       "turbo":     "glm-5-turbo",
       "4.7":       "glm-4.7",
       "4.7-flash": "glm-4.7-flash",
       "4-long":    "glm-4-long",
+    },
+  },
+  // 智谱 OpenAI Response 协议端点（/api/v1 只支持 responses）
+  "glm-responses": {
+    baseUrl: "https://open.bigmodel.cn/api/v1",
+    protocol: "openai-response",
+    models: {
+      "5.3": "glm-5.3", "5.2": "glm-5.2", "5.1": "glm-5.1",
+    },
+  },
+  // 智谱 Anthropic Message 协议端点
+  "glm-anthropic": {
+    baseUrl: "https://open.bigmodel.cn/api/anthropic",
+    protocol: "anthropic",
+    models: {
+      "5.3": "glm-5.3", "5.2": "glm-5.2", "5.1": "glm-5.1",
     },
   },
   anthropic: {
@@ -197,6 +216,31 @@ export function isAnthropic(): boolean {
   return activeProvider === "anthropic";
 }
 
+// ══════════════════════════════════════════════════════════════
+// 协议类型：openai-chat（默认）| openai-response | anthropic
+// 从 baseUrl / 显式配置推断，摆脱"提供商名绑定协议"的旧设计
+// ══════════════════════════════════════════════════════════════
+export type ProtocolKind = "openai-chat" | "openai-response" | "anthropic";
+
+/** 从 baseUrl + 模型名推断协议类型。 */
+export function inferProtocol(baseUrl: string, _model?: string): ProtocolKind {
+  const u = (baseUrl || "").toLowerCase();
+  if (u.includes("/anthropic")) return "anthropic";
+  // 智谱 OpenAI Response 协议专用端点（/api/v1 只支持 responses，不支持 chat/completions）
+  if (u.includes("open.bigmodel.cn/api/v1")) return "openai-response";
+  return "openai-chat";
+}
+
+/** 从 baseUrl 推断提供商 id（用于 thinking 参数差异化）。 */
+export function inferProviderId(baseUrl: string): string {
+  const u = (baseUrl || "").toLowerCase();
+  if (u.includes("bigmodel.cn")) return "glm";
+  if (u.includes("anthropic.com") || u.includes("/anthropic")) return "anthropic";
+  if (u.includes("deepseek.com")) return "deepseek";
+  if (u.includes("moonshot.cn")) return "moonshot";
+  return "openai";
+}
+
 export class LLMProvider {
   private apiKey: string;
   private baseUrl: string;
@@ -204,6 +248,10 @@ export class LLMProvider {
   private tools: FunctionSchema[];
   private timeout: number;
   private maxTokens: number;
+  /** 协议类型（实例级，从 baseUrl/显式配置推断） */
+  private protocol: ProtocolKind;
+  /** 提供商 id（实例级，用于 thinking 参数差异化） */
+  private providerId: string;
 
   /** 根据当前 provider 生成 thinking 参数。
    * GLM 使用 thinking_budget，DeepSeek/OpenAI 使用 reasoning_effort。
@@ -211,10 +259,10 @@ export class LLMProvider {
    */
   private _thinkingBody(thinking: boolean): Record<string, unknown> {
     if (!thinking) return {};
-    if (activeProvider === "glm") {
+    if (this.providerId === "glm") {
       return { extra_body: { thinking: { type: "enabled", thinking_budget: "max" } } };
     }
-    if (activeProvider === "anthropic") {
+    if (this.protocol === "anthropic") {
       return {};  // Anthropic thinking 在 _callAnthropic 中处理
     }
     return { extra_body: { thinking: { type: "enabled" } }, reasoning_effort: "max" };
@@ -234,6 +282,8 @@ export class LLMProvider {
     this.tools = config.tools;
     this.timeout = config.timeout;
     this.maxTokens = config.maxTokens;
+    this.protocol = config.protocol || inferProtocol(config.baseUrl, config.model);
+    this.providerId = inferProviderId(config.baseUrl);
   }
 
   get cacheStats(): CacheStats {
@@ -407,7 +457,8 @@ export class LLMProvider {
     // system 以 block 形式携带 cache_control 断点（静态前缀缓存）
     if (system) body.system = [{ type: "text", text: system, cache_control: anthropicCacheControl() }];
     if (this.tools.length > 0) body.tools = this._convertToolsToAnthropic();
-    if (thinking) body.thinking = { type: "enabled", budget_tokens: Math.min(this.maxTokens, 16000) };
+    // GLM 常思考模型（如 glm-5.3）不支持关闭思考 — 必须始终携带 thinking 参数
+    if (thinking || this.providerId === "glm") body.thinking = { type: "enabled", budget_tokens: Math.min(this.maxTokens, 16000) };
 
     const resp = await fetch(`${this.baseUrl}/v1/messages`, {
       method: "POST",
@@ -443,7 +494,8 @@ export class LLMProvider {
     // system 以 block 形式携带 cache_control 断点（静态前缀缓存）
     if (system) body.system = [{ type: "text", text: system, cache_control: anthropicCacheControl() }];
     if (this.tools.length > 0) body.tools = this._convertToolsToAnthropic();
-    if (thinking) body.thinking = { type: "enabled", budget_tokens: Math.min(this.maxTokens, 16000) };
+    // GLM 常思考模型（如 glm-5.3）不支持关闭思考 — 必须始终携带 thinking 参数
+    if (thinking || this.providerId === "glm") body.thinking = { type: "enabled", budget_tokens: Math.min(this.maxTokens, 16000) };
 
     const resp = await fetch(`${this.baseUrl}/v1/messages`, {
       method: "POST",
@@ -577,12 +629,195 @@ export class LLMProvider {
   }
 
   // ══════════════════════════════════════════════════════════════
+  // OpenAI Response 协议转换层（POST {base}/responses）
+  // 格式：input 消息数组 + 扁平 tools + output items（message/function_call/reasoning）
+  // ══════════════════════════════════════════════════════════════
+
+  /** OpenAI function schema → Response 协议扁平 tools 格式 */
+  private _convertToolsToResponses(): unknown[] {
+    return this.tools.map(t => ({
+      type: "function",
+      name: t.function?.name || "",
+      description: t.function?.description || "",
+      parameters: t.function?.parameters || { type: "object", properties: {} },
+    }));
+  }
+
+  /** 内部消息 → Response 协议 input 数组（system 提取为 instructions） */
+  private _convertMessagesToResponses(messages: Message[]): { instructions: string; input: unknown[] } {
+    let instructions = "";
+    const input: Array<Record<string, unknown>> = [];
+    for (const msg of messages) {
+      const content = msg.content || "";
+      if (msg.role === "system") {
+        if (content) instructions = instructions ? `${instructions}\n\n${content}` : content;
+        continue;
+      }
+      if (msg.role === "tool") {
+        // 工具结果 → function_call_output item
+        input.push({ type: "function_call_output", call_id: msg.tool_call_id || "", output: content });
+        continue;
+      }
+      if (msg.role === "assistant" && msg.tool_calls && msg.tool_calls.length > 0) {
+        // 助手文本 + 工具调用 → message item + function_call items
+        if (content) input.push({ role: "assistant", content });
+        for (const tc of msg.tool_calls) {
+          input.push({ type: "function_call", call_id: tc.id, name: tc.function.name, arguments: tc.function.arguments });
+        }
+        continue;
+      }
+      input.push({ role: msg.role, content });
+    }
+    return { instructions, input };
+  }
+
+  /** 解析 Response 协议 output items → LLMResponse */
+  private _parseResponsesOutput(data: Record<string, unknown>): LLMResponse {
+    const output = (data.output as Array<Record<string, any>>) || [];
+    let text = ""; let reasoning = "";
+    const toolCalls: ParsedToolCall[] = [];
+    for (const item of output) {
+      if (item.type === "message") {
+        for (const c of (item.content as Array<Record<string, any>>) || []) {
+          if (c.type === "output_text" && c.text) text += c.text;
+        }
+      } else if (item.type === "function_call") {
+        let args: Record<string, unknown> = {};
+        try { args = JSON.parse(item.arguments || "{}"); } catch { /* malformed */ }
+        toolCalls.push({ id: item.call_id || item.id || "", name: item.name || "", args });
+      } else if (item.type === "reasoning") {
+        for (const c of (item.content as Array<Record<string, any>>) || []) {
+          if ((c.type === "reasoning_text" || c.type === "summary_text") && c.text) reasoning += c.text;
+        }
+      }
+    }
+    return { text, toolCalls: toolCalls.length > 0 ? toolCalls : null, reasoning, finishReason: (data.status as string) || "" };
+  }
+
+  private async _callResponses(messages: Message[], thinking: boolean): Promise<LLMResponse> {
+    const { instructions, input } = this._convertMessagesToResponses(messages);
+    const body: Record<string, unknown> = {
+      model: this.model,
+      input,
+      tools: this.tools.length > 0 ? this._convertToolsToResponses() : undefined,
+      max_output_tokens: this.maxTokens,
+    };
+    if (instructions) body.instructions = instructions;
+
+    const resp = await fetch(`${this.baseUrl}/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(this.timeout * 1000),
+    });
+    await this._checkHttp(resp, "Responses");
+    const data = await resp.json() as Record<string, unknown>;
+    this.callCount++;
+    const usage = data.usage as Record<string, number> | undefined;
+    if (usage) {
+      this.totalInputTokens += usage.input_tokens || 0;
+      const cached = LLMProvider.extractCachedTokens(usage);
+      this.totalCachedTokens += cached;
+      if (cached > 0) this.cacheHits++;
+    }
+    return this._parseResponsesOutput(data);
+  }
+
+  private async _callResponsesStream(
+    messages: Message[],
+    onText?: (t: string) => void,
+    onAnswer?: (t: string) => void,
+    _thinking?: boolean,
+    onTool?: (name: string, args: Record<string, unknown>) => void,
+  ): Promise<LLMResponse> {
+    const { instructions, input } = this._convertMessagesToResponses(messages);
+    const body: Record<string, unknown> = {
+      model: this.model,
+      input,
+      tools: this.tools.length > 0 ? this._convertToolsToResponses() : undefined,
+      max_output_tokens: this.maxTokens,
+      stream: true,
+    };
+    if (instructions) body.instructions = instructions;
+
+    const resp = await fetch(`${this.baseUrl}/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(this.timeout * 1000),
+    });
+    await this._checkHttp(resp, "ResponsesStream");
+    const reader = resp.body?.getReader();
+    if (!reader) return { text: "", toolCalls: null, reasoning: "", finishReason: "" };
+    const decoder = new TextDecoder();
+
+    let text = ""; let reasoning = "";
+    const toolCalls: ParsedToolCall[] = [];
+    let finishReason = "";
+    let toolSeen = false;
+    let lineBuf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      lineBuf += decoder.decode(value, { stream: true });
+      const lines = lineBuf.split("\n");
+      lineBuf = lines.pop() || "";
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const data = line.slice(6).trim();
+        if (!data || data === "[DONE]") continue;
+        try {
+          const evt = JSON.parse(data);
+          const etype = evt.type as string;
+          // 答案文本增量
+          if (etype === "response.output_text.delta") {
+            const d = evt.delta || "";
+            text += d; onAnswer?.(d);
+          }
+          // 思考增量（OpenAI 标准 summary / 智谱 reasoning_text 双兼容）
+          else if (etype === "response.reasoning_text.delta" || etype === "response.reasoning_summary_text.delta") {
+            const d = evt.delta || "";
+            reasoning += d; onText?.(d);
+          }
+          // 完整 output item（function_call 在此收集）
+          else if (etype === "response.output_item.done") {
+            const item = evt.item || {};
+            if (item.type === "function_call") {
+              if (!toolSeen && onTool) { onTool("", {}); toolSeen = true; }
+              let args: Record<string, unknown> = {};
+              try { args = JSON.parse(item.arguments || "{}"); } catch { /* malformed */ }
+              toolCalls.push({ id: item.call_id || item.id || "", name: item.name || "", args });
+            }
+          }
+          // 完成：usage + status
+          else if (etype === "response.completed" || etype === "response.done") {
+            const r = evt.response || {};
+            finishReason = r.status || "completed";
+            const usage = r.usage;
+            if (usage) {
+              this.callCount++;
+              this.totalInputTokens += usage.input_tokens || 0;
+              const cached = LLMProvider.extractCachedTokens(usage);
+              this.totalCachedTokens += cached;
+              if (cached > 0) this.cacheHits++;
+            }
+          }
+        } catch { /* skip non-JSON */ }
+      }
+    }
+    return { text, toolCalls: toolCalls.length > 0 ? toolCalls : null, reasoning, finishReason };
+  }
+
+  // ══════════════════════════════════════════════════════════════
   // 统一调用入口 — 根据 provider 分发
   // ══════════════════════════════════════════════════════════════
 
   async call(messages: Message[], thinking = true): Promise<LLMResponse> {
-    if (isAnthropic()) {
+    if (this.protocol === "anthropic") {
       return this._callAnthropic(messages, thinking);
+    }
+    if (this.protocol === "openai-response") {
+      return this._callResponses(messages, thinking);
     }
 
     const body: Record<string, unknown> = {
@@ -639,8 +874,11 @@ export class LLMProvider {
     thinking = true,
     onTool?: (name: string, args: Record<string, unknown>) => void,
   ): Promise<LLMResponse> {
-    if (isAnthropic()) {
+    if (this.protocol === "anthropic") {
       return this._callAnthropicStream(messages, onText, onAnswer, thinking, onTool);
+    }
+    if (this.protocol === "openai-response") {
+      return this._callResponsesStream(messages, onText, onAnswer, thinking, onTool);
     }
 
     const body: Record<string, unknown> = {

@@ -113,6 +113,8 @@ export interface CacheStats {
 export interface AgentConfig {
   apiKey: string;
   baseUrl: string;
+  /** 显式协议；缺省从 baseUrl 推断（/anthropic→anthropic，智谱 /api/v1→openai-response） */
+  protocol?: "openai-chat" | "openai-response" | "anthropic";
   model: string;
   workDir: string;
   maxSteps: number;

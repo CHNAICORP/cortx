@@ -607,6 +607,7 @@ class ContextGovernor:
 class AgentConfig:
     api_key: str = ""
     base_url: str = "https://api.deepseek.com/v1"
+    protocol: str = ""  # 显式协议: openai-chat | openai-response | anthropic；空=从 base_url 推断
     model: str = "deepseek-v4-flash"
     work_dir: str = field(default_factory=lambda: os.path.join(os.path.expanduser("~"), ".cortx", "workspace"))
     max_steps: int = 0               # 0=无限（不限制步数，agent 自主决定何时完成）
@@ -719,7 +720,8 @@ class CortexAgent:
         self.llm = LLMProvider(self.config.api_key,
                                resolved_model, tool_schemas,
                                timeout=self.config.think_timeout,
-                               max_tokens=self.config.max_tokens)
+                               max_tokens=self.config.max_tokens,
+                               protocol=self.config.protocol or None)
         self._ctx: List[Dict] = []; self._trace = None
         self._last_reasoning: str = None
         self._last_llm_error: str = ""
@@ -840,6 +842,54 @@ class CortexAgent:
         self.llm.max_tokens = self.config.max_tokens
         # 重建 governor 以应用新的上下文窗口
         self.governor = self._make_governor()
+
+    def switch_provider(self, provider: str, alias: str = None) -> str:
+        """切换模型提供商（api_key/base_url/model 全量切换）并持久化到 settings.json。"""
+        pid = provider.lower().strip()
+        from .config import load_settings
+        settings = load_settings()
+        pcfg = (settings.get("providers") or {}).get(pid)
+        known = ["deepseek", "openai", "glm", "anthropic"]
+        if not pcfg and pid not in known:
+            return f"(x) 未知提供商: {pid}\n已知: {', '.join(known)}（需在 settings.json providers 中配置 api_key）"
+        if not pcfg or not pcfg.get("api_key"):
+            return f"(x) 提供商 {pid} 未配置 API Key\n请在 ~/.cortx/settings.json 的 providers.{pid}.api_key 填入 Key"
+        models = pcfg.get("models") or {}
+        # 别名解析两级查找：settings models 映射 → 内置 DEFAULT_PROVIDERS 全量映射
+        builtin = (LLMProvider.DEFAULT_PROVIDERS.get(pid) or {}).get("models") or {}
+        lookup = {**builtin, **models}
+        effective_alias = alias if (alias and lookup.get(alias)) else (next(iter(models), None) or next(iter(builtin), None))
+        if not effective_alias:
+            return f"(x) 提供商 {pid} 未配置 models 映射\n请在 settings.json 的 providers.{pid}.models 中定义别名 → 模型名"
+        model_name = lookup[effective_alias]
+        base_url = pcfg.get("base_url") or self.config.base_url
+        # 切换类级 provider（base_url 由类级 _active 决定）+ 重建 LLMProvider 实例
+        LLMProvider.setup(settings.get("providers"), pid)
+        self.llm = LLMProvider(pcfg["api_key"], model_name, registry.schemas,
+                               timeout=self.config.think_timeout, max_tokens=self.config.max_tokens,
+                               protocol=pcfg.get("protocol") or None)
+        self.config.model = model_name
+        self.config.api_key = pcfg["api_key"]
+        self.config.base_url = base_url
+        caps = LLMProvider.resolve_capabilities(model_name)
+        self.config.context_limit = caps["context_window"]
+        self.config.max_tokens = caps["max_output_tokens"]
+        self.llm.max_tokens = self.config.max_tokens
+        self.governor = self._make_governor()
+        # 持久化到 settings.json（下次启动生效）
+        try:
+            import json as _json
+            user_path = os.path.join(os.path.expanduser("~"), ".cortx", "settings.json")
+            if os.path.exists(user_path):
+                with open(user_path, "r", encoding="utf-8") as f:
+                    data = _json.load(f)
+                data["provider"] = pid
+                data["model"] = effective_alias
+                with open(user_path, "w", encoding="utf-8") as f:
+                    _json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass  # 持久化失败不阻断切换
+        return f"✅ 已切换 → {pid}/{effective_alias} ({model_name})"
 
     def switch_permission_mode(self, mode: str) -> str:
         """运行时切换权限模式。返回新模式的描述。

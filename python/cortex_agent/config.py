@@ -194,6 +194,9 @@ def apply_to_config(config, settings: dict):
     api_key = provider_cfg.get("api_key", "") or settings.get("api_key", "") or config.api_key
     config.api_key = api_key
 
+    # 协议：显式配置优先（openai-chat | openai-response | anthropic），空=从 base_url 推断
+    config.protocol = provider_cfg.get("protocol", "") or ""
+
     # 简单字段
     for key in ("model", "max_steps", "tool_timeout", "system_prompt",
                 "max_context_msgs", "loop_timeout", "think_timeout",

@@ -51,6 +51,7 @@ class LLMProvider:
             "name": "glm",
             "base_url": "https://open.bigmodel.cn/api/paas/v4",
             "models": {
+                "5.3":       "glm-5.3",
                 "5.2":       "glm-5.2",
                 "5.1":       "glm-5.1",
                 "turbo":     "glm-5-turbo",
@@ -58,6 +59,20 @@ class LLMProvider:
                 "4.7-flash": "glm-4.7-flash",
                 "4-long":    "glm-4-long",
             },
+        },
+        # 智谱 OpenAI Response 协议端点（/api/v1 只支持 responses）
+        "glm-responses": {
+            "name": "glm-responses",
+            "base_url": "https://open.bigmodel.cn/api/v1",
+            "protocol": "openai-response",
+            "models": {"5.3": "glm-5.3", "5.2": "glm-5.2", "5.1": "glm-5.1"},
+        },
+        # 智谱 Anthropic Message 协议端点
+        "glm-anthropic": {
+            "name": "glm-anthropic",
+            "base_url": "https://open.bigmodel.cn/api/anthropic",
+            "protocol": "anthropic",
+            "models": {"5.3": "glm-5.3", "5.2": "glm-5.2", "5.1": "glm-5.1"},
         },
         "anthropic": {
             "name": "anthropic",
@@ -206,6 +221,38 @@ class LLMProvider:
         """当前 provider 是否为 Anthropic（使用独立的 Messages API）。"""
         return cls.provider_name() == "anthropic"
 
+    # ── 协议类型：openai-chat（默认）| openai-response | anthropic ──
+    # 从 baseUrl / 显式配置推断，摆脱"提供商名绑定协议"的旧设计
+
+    @staticmethod
+    def infer_protocol(base_url: str) -> str:
+        """从 baseUrl 推断协议类型。"""
+        u = (base_url or "").lower()
+        if "/anthropic" in u:
+            return "anthropic"
+        # 智谱 OpenAI Response 协议专用端点（/api/v1 只支持 responses）
+        if "open.bigmodel.cn/api/v1" in u:
+            return "openai-response"
+        return "openai-chat"
+
+    @staticmethod
+    def infer_provider_id(base_url: str) -> str:
+        """从 baseUrl 推断提供商 id（用于 thinking 参数差异化）。"""
+        u = (base_url or "").lower()
+        if "bigmodel.cn" in u:
+            return "glm"
+        if "anthropic.com" in u or "/anthropic" in u:
+            return "anthropic"
+        if "deepseek.com" in u:
+            return "deepseek"
+        if "moonshot.cn" in u:
+            return "moonshot"
+        return "openai"
+
+    def protocol_kind(self) -> str:
+        """实例协议（显式配置优先，否则从 base_url 推断）。"""
+        return getattr(self, "_protocol", "") or self.infer_protocol(self.base_url())
+
     @classmethod
     def resolve_capabilities(cls, model: str) -> dict:
         """解析模型的上下文窗口和最大输出 token 数。
@@ -229,12 +276,15 @@ class LLMProvider:
         return cls._FALLBACK_CAPS
 
     def __init__(self, api_key: str, model: str, tools: List[Dict],
-                 timeout: float = 60.0, max_tokens: int = 8192):
+                 timeout: float = 60.0, max_tokens: int = 8192, protocol: str = None):
         self.api_key = api_key
         self.client = OpenAI(api_key=api_key, base_url=self.base_url(),
                              timeout=httpx.Timeout(timeout, connect=10.0))
         self.model = model; self.tools = tools
         self.max_tokens = max_tokens
+        # 协议实例化：显式配置优先，否则从 base_url 推断
+        self._protocol = protocol or self.infer_protocol(self.base_url())
+        self._provider_id = self.infer_provider_id(self.base_url())
         # ── 缓存命中率追踪 ──
         self._call_count: int = 0
         self._cache_hits: int = 0
@@ -491,7 +541,7 @@ class LLMProvider:
                                "cache_control": self._cache_control()}]
         if self.tools:
             body["tools"] = self._convert_tools_to_anthropic()
-        if thinking:
+        if thinking or getattr(self, "_provider_id", "") == "glm":  # GLM 常思考模型必须始终携带
             body["thinking"] = {"type": "enabled", "budget_tokens": min(self.max_tokens, 16000)}
 
         resp = self.client._client.post(
@@ -532,7 +582,7 @@ class LLMProvider:
                                "cache_control": self._cache_control()}]
         if self.tools:
             body["tools"] = self._convert_tools_to_anthropic()
-        if thinking:
+        if thinking or getattr(self, "_provider_id", "") == "glm":  # GLM 常思考模型必须始终携带
             body["thinking"] = {"type": "enabled", "budget_tokens": min(self.max_tokens, 16000)}
 
         resp = self.client._client.post(
@@ -669,6 +719,160 @@ class LLMProvider:
         return text, tcs, reasoning, finish_reason
 
     # ══════════════════════════════════════════════════════════════
+    # OpenAI Response 协议转换层（POST {base}/responses）
+    # 格式：input 消息数组 + 扁平 tools + output items
+    # ══════════════════════════════════════════════════════════════
+
+    def _convert_tools_to_responses(self) -> list:
+        return [{
+            "type": "function",
+            "name": t["function"]["name"],
+            "description": t["function"].get("description", ""),
+            "parameters": t["function"].get("parameters", {"type": "object", "properties": {}}),
+        } for t in self.tools]
+
+    def _convert_messages_to_responses(self, messages: List[Dict]) -> tuple:
+        """内部消息 → (instructions, input 数组)。system 提取为 instructions。"""
+        instructions = ""
+        input_items: list = []
+        for msg in messages:
+            content = msg.get("content", "") or ""
+            role = msg.get("role")
+            if role == "system":
+                if content:
+                    instructions = (instructions + "\n\n" + content) if instructions else content
+                continue
+            if role == "tool":
+                input_items.append({"type": "function_call_output",
+                                    "call_id": msg.get("tool_call_id", ""), "output": content})
+                continue
+            if role == "assistant" and msg.get("tool_calls"):
+                if content:
+                    input_items.append({"role": "assistant", "content": content})
+                for tc in msg["tool_calls"]:
+                    input_items.append({"type": "function_call", "call_id": tc["id"],
+                                        "name": tc["function"]["name"],
+                                        "arguments": tc["function"]["arguments"]})
+                continue
+            input_items.append({"role": role, "content": content})
+        return instructions, input_items
+
+    def _parse_responses_output(self, data: dict) -> tuple:
+        """解析 Response 协议 output items → (text, tool_calls, reasoning, finish_reason)。"""
+        text_parts, reasoning_parts = [], []
+        tool_calls = []
+        for item in (data.get("output") or []):
+            itype = item.get("type")
+            if itype == "message":
+                for c in (item.get("content") or []):
+                    if c.get("type") == "output_text" and c.get("text"):
+                        text_parts.append(c["text"])
+            elif itype == "function_call":
+                try:
+                    args = json.loads(item.get("arguments") or "{}")
+                except Exception:
+                    args = {}
+                tool_calls.append({"id": item.get("call_id") or item.get("id") or "",
+                                   "name": item.get("name") or "", "args": args})
+            elif itype == "reasoning":
+                for c in (item.get("content") or []):
+                    if c.get("type") in ("reasoning_text", "summary_text") and c.get("text"):
+                        reasoning_parts.append(c["text"])
+        usage = data.get("usage") or {}
+        if usage.get("input_tokens"):
+            self._call_count += 1
+            self._total_input_tokens += usage.get("input_tokens", 0)
+        return ("".join(text_parts), tool_calls or None, "".join(reasoning_parts),
+                data.get("status") or "")
+
+    def _call_responses(self, messages: List[Dict], thinking: bool = True) -> tuple:
+        """OpenAI Response 协议非流式调用。"""
+        instructions, input_items = self._convert_messages_to_responses(messages)
+        body: Dict = {"model": self.model, "input": input_items,
+                      "max_output_tokens": self.max_tokens}
+        if self.tools:
+            body["tools"] = self._convert_tools_to_responses()
+        if instructions:
+            body["instructions"] = instructions
+        resp = self.client._client.post(
+            f"{self.base_url()}/responses",
+            headers={"Authorization": f"Bearer {self.api_key}",
+                     "content-type": "application/json"},
+            json=body,
+        )
+        resp.raise_for_status()
+        return self._parse_responses_output(resp.json())
+
+    def _call_responses_stream(self, messages: List[Dict],
+                               on_text=None, on_answer=None, on_tool=None,
+                               thinking: bool = True) -> tuple:
+        """OpenAI Response 协议流式调用（SSE 事件）。"""
+        instructions, input_items = self._convert_messages_to_responses(messages)
+        body: Dict = {"model": self.model, "input": input_items,
+                      "max_output_tokens": self.max_tokens, "stream": True}
+        if self.tools:
+            body["tools"] = self._convert_tools_to_responses()
+        if instructions:
+            body["instructions"] = instructions
+        resp = self.client._client.post(
+            f"{self.base_url()}/responses",
+            headers={"Authorization": f"Bearer {self.api_key}",
+                     "content-type": "application/json"},
+            json=body,
+        )
+        resp.raise_for_status()
+        text_parts, reasoning_parts = [], []
+        tool_calls = []
+        finish_reason = ""
+        tool_seen = False
+        # SSE 逐行解析（httpx iter_lines 生成器，与 anthropic 流式路径一致）
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            if isinstance(line, bytes):
+                line = line.decode("utf-8")
+            if not line.startswith("data: "):
+                continue
+            data_str = line[6:].strip()
+            if not data_str or data_str == "[DONE]":
+                continue
+            try:
+                evt = json.loads(data_str)
+            except Exception:
+                continue
+            etype = evt.get("type", "")
+            if etype == "response.output_text.delta":
+                d = evt.get("delta") or ""
+                text_parts.append(d)
+                if on_answer:
+                    on_answer(d)
+            elif etype in ("response.reasoning_text.delta", "response.reasoning_summary_text.delta"):
+                d = evt.get("delta") or ""
+                reasoning_parts.append(d)
+                if on_text:
+                    on_text(d)
+            elif etype == "response.output_item.done":
+                item = evt.get("item") or {}
+                if item.get("type") == "function_call":
+                    if not tool_seen and on_tool:
+                        on_tool("", {})
+                        tool_seen = True
+                    try:
+                        args = json.loads(item.get("arguments") or "{}")
+                    except Exception:
+                        args = {}
+                    tool_calls.append({"id": item.get("call_id") or item.get("id") or "",
+                                       "name": item.get("name") or "", "args": args})
+            elif etype in ("response.completed", "response.done"):
+                r = evt.get("response") or {}
+                finish_reason = r.get("status") or "completed"
+                usage = r.get("usage") or {}
+                if usage.get("input_tokens"):
+                    self._call_count += 1
+                    self._total_input_tokens += usage.get("input_tokens", 0)
+        return ("".join(text_parts), tool_calls or None, "".join(reasoning_parts), finish_reason)
+
+    # ══════════════════════════════════════════════════════════════
     # 统一调用入口 — 根据 provider 分发
     # ══════════════════════════════════════════════════════════════
 
@@ -679,8 +883,10 @@ class LLMProvider:
         thinking=False 时关闭推理模式，用于空响应恢复——确保 LLM 将全部
         max_tokens 预算用于 content/tool_calls 而非 reasoning。
         """
-        if self.is_anthropic():
+        if self.protocol_kind() == "anthropic":
             return self._call_anthropic(messages, thinking)
+        if self.protocol_kind() == "openai-response":
+            return self._call_responses(messages, thinking)
 
         kwargs: Dict = {
             "model": self.model, "messages": messages,
@@ -711,8 +917,10 @@ class LLMProvider:
         
         thinking=False 时关闭推理模式，用于空响应恢复。
         """
-        if self.is_anthropic():
+        if self.protocol_kind() == "anthropic":
             return self._call_anthropic_stream(messages, on_text, on_answer, on_tool, thinking)
+        if self.protocol_kind() == "openai-response":
+            return self._call_responses_stream(messages, on_text, on_answer, on_tool, thinking)
 
         kwargs: Dict = {
             "model": self.model, "messages": messages,
