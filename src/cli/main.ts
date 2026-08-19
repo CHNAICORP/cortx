@@ -287,7 +287,7 @@ async function main(): Promise<void> {
                    openai: { api_key: "", base_url: "https://api.openai.com/v1", models: { "5.4": "gpt-5.4", "5.4-mini": "gpt-5.4-mini", "5.2": "gpt-5.2", "4.1": "gpt-4.1", "4o": "gpt-4o", "4o-mini": "gpt-4o-mini" } },
                    glm: { api_key: "", base_url: "https://open.bigmodel.cn/api/paas/v4", models: { "5.2": "glm-5.2", "5.1": "glm-5.1", "turbo": "glm-5-turbo", "4.7": "glm-4.7", "4.7-flash": "glm-4.7-flash", "4-long": "glm-4-long" } },
                    anthropic: { api_key: "", base_url: "https://api.anthropic.com", models: { fable: "claude-fable-5", mythos: "claude-mythos-5", sonnet: "claude-sonnet-5", opus: "claude-opus-4-8", "opus-pro": "claude-opus-4-7", haiku: "claude-haiku-4-5" } } },
-      web_search: { provider: "duckduckgo", brave_api_key: "", serpapi_api_key: "", tavily_api_key: "", max_results: 5, timeout: 10 },
+      web_search: { provider: "bing", brave_api_key: "", serpapi_api_key: "", tavily_api_key: "", zhipu_api_key: "", exa_api_key: "", firecrawl_api_key: "", max_results: 15, timeout: 10 },
       max_steps: 0, context_limit: 0, max_tokens: 0, max_input_tokens: 0, permission_mode: "standard",
       compress_threshold: 6000, compress_head: 2400, compress_tail: 1600, safety_margin: 4096,
       input_warn_pct: 80, input_force_pct: 90, compact_input_pct: 85, compact_keep_recent: 12,
@@ -388,6 +388,39 @@ async function main(): Promise<void> {
     }
     const mChoice = (await ask(`  ${C.GREEN}请选择 (${Object.keys(modelsMap).join('/')}):${C.RESET} `)).trim() || "1";
     const [modelAlias, modelName] = (modelsMap[mChoice] || modelsMap["1"]);
+
+    // ── 第 4 步: 联网搜索增强（可选）──
+    console.log(`\n  ${C.YELLOW}🌐 联网搜索增强 (回车跳过 = 内置免费搜索):${C.RESET}`);
+    const searchProviders: Array<[string, string, string, string, string]> = [
+      ["1", "builtin",   "内置搜索（默认）", "Bing 抓取",            "完全免费 / 免配置"],
+      ["2", "zhipu",     "智谱联网搜索",     "国内直连快 · 质量高",  "0.01元/次 · 需 API Key"],
+      ["3", "tavily",    "Tavily",           "海外 · AI 优化搜索",   "1000次/月免费 · 需 Key"],
+      ["4", "brave",     "Brave Search",     "海外 · 隐私搜索",      "$5/月免费额度 · 需 Key"],
+      ["5", "exa",       "Exa",              "海外 · 神经搜索",      "注册送$20 · 需 Key"],
+      ["6", "firecrawl", "Firecrawl",        "海外 · 搜索+抓取",     "1000次/月免费 · 需 Key"],
+    ];
+    for (const [k, , name, desc, pricing] of searchProviders) {
+      const marker = k === "1" ? "★" : " ";
+      console.log(`    ${C.GREEN}${marker} [${k}]${C.RESET} ${C.BOLD}${name.padEnd(12)}${C.RESET} ${C.DIM}${desc}${C.RESET}  ${C.GRAY}${pricing}${C.RESET}`);
+    }
+    const sChoice = (await ask(`  ${C.GREEN}请选择 (1-6):${C.RESET} `)).trim() || "1";
+    const sEntry = searchProviders.find(p => p[0] === sChoice) || searchProviders[0];
+    const searchProv = sEntry[1];
+    const keyFieldMap: Record<string, string> = { zhipu: "zhipu_api_key", tavily: "tavily_api_key", brave: "brave_api_key", exa: "exa_api_key", firecrawl: "firecrawl_api_key" };
+    const searchKeyUrls: Record<string, string> = {
+      zhipu: "https://open.bigmodel.cn/console/apikeys",
+      tavily: "https://app.tavily.com",
+      brave: "https://api-dashboard.search.brave.com",
+      exa: "https://dashboard.exa.ai/api-keys",
+      firecrawl: "https://firecrawl.dev",
+    };
+    const searchKeys: Record<string, string> = {};
+    if (searchProv !== "builtin") {
+      console.log(`  ${C.GRAY}获取 Key: ${searchKeyUrls[searchProv] || ""}${C.RESET}`);
+      const sk = (await ask(`  ${C.GREEN}API Key (回车跳过):${C.RESET} `)).trim();
+      if (sk) searchKeys[keyFieldMap[searchProv]] = sk;
+      else console.log(`  ${C.GRAY}已跳过 — 将使用内置免费搜索${C.RESET}`);
+    }
     rl.close();
     const baseUrls: Record<string, string> = {
       deepseek: "https://api.deepseek.com/v1",
@@ -396,24 +429,48 @@ async function main(): Promise<void> {
       glm: "https://open.bigmodel.cn/api/paas/v4",
     };
     const userPath = path.join(os.homedir(), ".cortx", "settings.json");
+    // 联网搜索配置：选了供应商且填了 key 才启用该引擎，否则回退内置 bing
+    const effectiveSearchProv = (searchProv !== "builtin" && Object.keys(searchKeys).length > 0) ? searchProv : "bing";
+    const webSearch: Record<string, unknown> = {
+      provider: effectiveSearchProv,
+      brave_api_key: "", serpapi_api_key: "", tavily_api_key: "",
+      zhipu_api_key: "", exa_api_key: "", firecrawl_api_key: "",
+      max_results: 15, timeout: 10,
+      ...searchKeys,
+    };
+    // MCP 注册：内置预装 + 选用的搜索供应商
+    const mcpServers: Record<string, unknown> = {
+      "chrome-devtools": { command: "npx", args: ["-y", "chrome-devtools-mcp@latest"], description: "Chrome DevTools — 浏览器导航/截图/DOM/性能分析" },
+      "cua-driver": { command: "cua-driver", args: ["mcp"], description: "桌面控制 — 截图/点击/键盘/拖拽/滚动/应用管理" },
+    };
+    if (searchProv === "zhipu" && searchKeys.zhipu_api_key) {
+      mcpServers["zhipu-web-search"] = { url: "https://open.bigmodel.cn/api/mcp/web_search_pro/mcp", headers: { Authorization: `Bearer ${searchKeys.zhipu_api_key}` }, description: "智谱联网搜索 MCP — 国内直连" };
+    } else if (searchProv === "tavily" && searchKeys.tavily_api_key) {
+      mcpServers["tavily"] = { command: "npx", args: ["-y", "tavily-mcp@latest"], env: { TAVILY_API_KEY: searchKeys.tavily_api_key }, description: "Tavily 联网搜索 MCP" };
+    } else if (searchProv === "brave" && searchKeys.brave_api_key) {
+      mcpServers["brave-search"] = { command: "npx", args: ["-y", "@brave/brave-search-mcp-server"], env: { BRAVE_API_KEY: searchKeys.brave_api_key }, description: "Brave Search MCP" };
+    } else if (searchProv === "exa" && searchKeys.exa_api_key) {
+      mcpServers["exa"] = { url: "https://mcp.exa.ai/mcp", headers: { "x-api-key": searchKeys.exa_api_key }, description: "Exa 联网搜索 MCP" };
+    } else if (searchProv === "firecrawl" && searchKeys.firecrawl_api_key) {
+      mcpServers["firecrawl"] = { command: "npx", args: ["-y", "firecrawl-mcp"], env: { FIRECRAWL_API_KEY: searchKeys.firecrawl_api_key }, description: "Firecrawl 搜索+抓取 MCP" };
+    }
     const newSettings = {
       model: modelAlias, provider: prov,
       providers: { [prov]: { api_key: apiKey, base_url: baseUrls[prov], models: { [modelAlias]: modelName } } },
+      web_search: webSearch,
       max_steps: 0, context_limit: 0, max_tokens: 0, max_input_tokens: 0, permission_mode: "standard",
       compress_threshold: 6000, compress_head: 2400, compress_tail: 1600, safety_margin: 4096,
       input_warn_pct: 80, input_force_pct: 90, compact_input_pct: 85, compact_keep_recent: 12,
       max_result_chars: 50000, memory_inject_count: 30,
       auto_extract_memory: true, memory_enabled: true, sessions_enabled: true,
-      mcpServers: {
-        "chrome-devtools": { command: "npx", args: ["-y", "chrome-devtools-mcp@latest"], description: "Chrome DevTools — 浏览器导航/截图/DOM/性能分析" },
-        "cua-driver": { command: "cua-driver", args: ["mcp"], description: "桌面控制 — 截图/点击/键盘/拖拽/滚动/应用管理" },
-      },
+      mcpServers,
       hooks: {},
     };
     fs.mkdirSync(path.dirname(userPath), { recursive: true });
     fs.writeFileSync(userPath, JSON.stringify(newSettings, null, 2), "utf-8");
     console.log(`\n  ${C.GREEN}✅ 配置已保存${C.RESET}  ${C.GRAY}${userPath}${C.RESET}`);
     console.log(`  ${C.CYAN}▸ 提供商:${C.RESET} ${provName}  ${C.CYAN}▸ 模型:${C.RESET} ${modelAlias} (${modelName})`);
+    console.log(`  ${C.CYAN}▸ 联网搜索:${C.RESET} ${effectiveSearchProv === "bing" ? "内置 Bing（免费）" : `${sEntry[2]} (${effectiveSearchProv})`}`);
     console.log(`  ${C.CYAN}启动 Cortex Agent...${C.RESET}\n`);
     Object.assign(settings, newSettings);
   }

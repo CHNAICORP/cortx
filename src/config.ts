@@ -102,11 +102,14 @@ export function loadSettings(): Settings {
         },
       },
       web_search: {
-        provider: "duckduckgo",          // duckduckgo | brave | serpapi | tavily
+        provider: "bing",                // bing内置免费 | zhipu | tavily | brave | serpapi | exa | firecrawl
         brave_api_key: "",
         serpapi_api_key: "",
         tavily_api_key: "",
-        max_results: 5,
+        zhipu_api_key: "",
+        exa_api_key: "",
+        firecrawl_api_key: "",
+        max_results: 15,
         timeout: 10,
       },
       max_steps: 0, context_limit: 0, max_tokens: 0, max_input_tokens: 0, permission_mode: "standard",

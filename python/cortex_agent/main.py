@@ -153,7 +153,40 @@ def setup_wizard(config: 'AgentConfig', settings: dict) -> 'AgentConfig':
     m_choice = input(f"  {t.GREEN}请选择 ({'/'.join(prov_models.keys())}):{t.RESET} ").strip() or default_key
     model_alias, model_name, _, _ = prov_models.get(m_choice, prov_models.get(default_key, ("pro", "deepseek-v4-pro", "", "")))
 
-    # 4. 保存配置
+    # 4. 联网搜索增强（可选）
+    t._w(f"\n  {t.YELLOW}🌐 联网搜索增强 (回车跳过 = 内置免费搜索):{t.RESET}\n")
+    search_providers = {
+        "1": ("builtin",   "内置搜索（默认）", "Bing 抓取",            "完全免费 / 免配置"),
+        "2": ("zhipu",     "智谱联网搜索",     "国内直连快 · 质量高",  "0.01元/次 · 需 API Key"),
+        "3": ("tavily",    "Tavily",           "海外 · AI 优化搜索",   "1000次/月免费 · 需 Key"),
+        "4": ("brave",     "Brave Search",     "海外 · 隐私搜索",      "$5/月免费额度 · 需 Key"),
+        "5": ("exa",       "Exa",              "海外 · 神经搜索",      "注册送$20 · 需 Key"),
+        "6": ("firecrawl", "Firecrawl",        "海外 · 搜索+抓取",     "1000次/月免费 · 需 Key"),
+    }
+    for k, (_, name, desc, pricing) in search_providers.items():
+        marker = "★" if k == "1" else " "
+        t._w(f"    {t.GREEN}{marker} [{k}]{t.RESET} {t.BOLD}{name:<12}{t.RESET} {t.DIM}{desc}{t.RESET}  {t.GRAY}{pricing}{t.RESET}\n")
+    s_choice = input(f"  {t.GREEN}请选择 (1-6):{t.RESET} ").strip() or "1"
+    search_prov, s_name = search_providers.get(s_choice, search_providers["1"])[:2]
+    key_field_map = {"zhipu": "zhipu_api_key", "tavily": "tavily_api_key", "brave": "brave_api_key",
+                     "exa": "exa_api_key", "firecrawl": "firecrawl_api_key"}
+    search_key_urls = {
+        "zhipu": "https://open.bigmodel.cn/console/apikeys",
+        "tavily": "https://app.tavily.com",
+        "brave": "https://api-dashboard.search.brave.com",
+        "exa": "https://dashboard.exa.ai/api-keys",
+        "firecrawl": "https://firecrawl.dev",
+    }
+    search_keys = {}
+    if search_prov != "builtin":
+        t._w(f"  {t.GRAY}获取 Key: {search_key_urls.get(search_prov, '')}{t.RESET}\n")
+        sk = input(f"  {t.GREEN}API Key (回车跳过):{t.RESET} ").strip()
+        if sk:
+            search_keys[key_field_map[search_prov]] = sk
+        else:
+            t._w(f"  {t.GRAY}已跳过 — 将使用内置免费搜索{t.RESET}\n")
+
+    # 5. 保存配置
     _base_urls = {
         "deepseek":  "https://api.deepseek.com/v1",
         "anthropic": "https://api.anthropic.com",
@@ -161,13 +194,51 @@ def setup_wizard(config: 'AgentConfig', settings: dict) -> 'AgentConfig':
         "glm":       "https://open.bigmodel.cn/api/paas/v4",
     }
     user_path = os.path.join(os.path.expanduser("~"), ".cortx", "settings.json")
+    # 联网搜索配置：选了供应商且填了 key 才启用该引擎，否则回退内置 bing
+    effective_search_prov = search_prov if (search_prov != "builtin" and search_keys) else "bing"
+    web_search = {
+        "provider": effective_search_prov,
+        "brave_api_key": "", "serpapi_api_key": "", "tavily_api_key": "",
+        "zhipu_api_key": "", "exa_api_key": "", "firecrawl_api_key": "",
+        "max_results": 15, "timeout": 10,
+        **search_keys,
+    }
+    # MCP 注册：内置预装 + 选用的搜索供应商
+    mcp_servers = {
+        "chrome-devtools": {"command": "npx", "args": ["-y", "chrome-devtools-mcp@latest"],
+                            "description": "Chrome DevTools — 浏览器导航/截图/DOM/性能分析"},
+        "cua-driver": {"command": "cua-driver", "args": ["mcp"],
+                       "description": "桌面控制 — 截图/点击/键盘/拖拽/滚动/应用管理"},
+    }
+    if search_prov == "zhipu" and search_keys.get("zhipu_api_key"):
+        mcp_servers["zhipu-web-search"] = {"url": "https://open.bigmodel.cn/api/mcp/web_search_pro/mcp",
+                                           "headers": {"Authorization": f"Bearer {search_keys['zhipu_api_key']}"},
+                                           "description": "智谱联网搜索 MCP — 国内直连"}
+    elif search_prov == "tavily" and search_keys.get("tavily_api_key"):
+        mcp_servers["tavily"] = {"command": "npx", "args": ["-y", "tavily-mcp@latest"],
+                                 "env": {"TAVILY_API_KEY": search_keys["tavily_api_key"]},
+                                 "description": "Tavily 联网搜索 MCP"}
+    elif search_prov == "brave" and search_keys.get("brave_api_key"):
+        mcp_servers["brave-search"] = {"command": "npx", "args": ["-y", "@brave/brave-search-mcp-server"],
+                                       "env": {"BRAVE_API_KEY": search_keys["brave_api_key"]},
+                                       "description": "Brave Search MCP"}
+    elif search_prov == "exa" and search_keys.get("exa_api_key"):
+        mcp_servers["exa"] = {"url": "https://mcp.exa.ai/mcp",
+                              "headers": {"x-api-key": search_keys["exa_api_key"]},
+                              "description": "Exa 联网搜索 MCP"}
+    elif search_prov == "firecrawl" and search_keys.get("firecrawl_api_key"):
+        mcp_servers["firecrawl"] = {"command": "npx", "args": ["-y", "firecrawl-mcp"],
+                                    "env": {"FIRECRAWL_API_KEY": search_keys["firecrawl_api_key"]},
+                                    "description": "Firecrawl 搜索+抓取 MCP"}
     new_settings = {
         "model": model_alias,
         "provider": provider,
         "providers": {provider: {"api_key": api_key, "base_url": _base_urls[provider],
                                   "models": {model_alias: model_name}}},
+        "web_search": web_search,
         "max_steps": 0, "context_limit": 0, "max_tokens": 0, "permission_mode": "standard",
         "auto_extract_memory": True, "memory_enabled": True, "sessions_enabled": True,
+        "mcpServers": mcp_servers,
     }
     os.makedirs(os.path.dirname(user_path), exist_ok=True)
     with open(user_path, "w", encoding="utf-8") as f:
@@ -177,6 +248,7 @@ def setup_wizard(config: 'AgentConfig', settings: dict) -> 'AgentConfig':
     t._w(f"\n  {t.GREEN}✅ 配置已保存{t.RESET}  {t.GRAY}{user_path}{t.RESET}\n")
     t._w(f"  {t.CYAN}▸ 提供商:{t.RESET} {prov_name}  ")
     t._w(f"{t.CYAN}▸ 模型:{t.RESET} {model_alias} ({model_name})\n")
+    t._w(f"  {t.CYAN}▸ 联网搜索:{t.RESET} {'内置 Bing（免费）' if effective_search_prov == 'bing' else f'{s_name} ({effective_search_prov})'}\n")
     t._w(f"  {t.CYAN}启动 Cortex Agent...{t.RESET}\n\n")
 
     config.api_key = api_key

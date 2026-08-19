@@ -687,7 +687,7 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
     """
     # ── 解析参数 ──
     cfg = _load_web_search_config()
-    provider = cfg.get("provider", "duckduckgo")
+    provider = cfg.get("provider", "bing")
     n = int(max_results) if max_results and int(max_results) > 0 else int(cfg.get("max_results", 15))
     timeout = int(cfg.get("timeout", 10))
     opener = _build_opener("https://cn.bing.com")  # 国内域名，不需要代理
@@ -704,6 +704,93 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
 
     raw_results: list = []
     engine_used = ""
+    tried_engines = []  # 引擎尝试链：回退时显示完整路径（如 Zhipu→Bing）
+
+    # ── 智谱联网搜索（国内直连，0.01元/次，用户配了 key 才用）──
+    if provider == "zhipu" and cfg.get("zhipu_api_key"):
+        try:
+            zs_req = urllib.request.Request(
+                "https://open.bigmodel.cn/api/paas/v4/web_search",
+                data=json.dumps({"search_engine": "search_std", "search_query": query,
+                                 "count": n, "content_size": "medium"}).encode(),
+                headers={
+                    "Authorization": f"Bearer {cfg['zhipu_api_key']}",
+                    "Content-Type": "application/json",
+                    "User-Agent": USER_AGENT_SHORT,
+                }, method="POST")
+            with _build_opener("https://open.bigmodel.cn").open(zs_req, timeout=timeout) as r:
+                data = json.loads(r.read().decode("utf-8", errors="ignore"))
+            if data.get("error"):
+                raise RuntimeError(f"智谱 API 错误 {data['error'].get('code', '')}: {data['error'].get('message', '')}")
+            zs_items = data.get("search_result", []) or []
+            for item in zs_items[:n]:
+                # title 兜底（个别条目缺 title），link 缺失才跳过
+                link = item.get("link", "") or item.get("url", "")
+                if link:
+                    raw_results.append({
+                        "title": item.get("title", "") or item.get("media", "") or "(未命名)",
+                        "url": link,
+                        "snippet": item.get("content", ""),
+                    })
+            # 智谱已返回结果（哪怕 1 条）就使用，不回退 Bing
+            if raw_results:
+                engine_used = "Zhipu"
+            elif zs_items:
+                # 返回了条目但全部缺 link — 罕见，记录后回退
+                tried_engines.append("Zhipu")
+                print(f"[web_search] Zhipu 返回 {len(zs_items)} 条但均缺 link，回退内置", file=sys.stderr)
+        except Exception as e:
+            tried_engines.append("Zhipu")
+            print(f"[web_search] Zhipu 引擎失败，回退内置: {e}", file=sys.stderr)
+
+    # ── Exa 搜索（海外，注册送 $20 额度）──
+    if not raw_results and provider == "exa" and cfg.get("exa_api_key"):
+        try:
+            exa_req = urllib.request.Request(
+                "https://api.exa.ai/search",
+                data=json.dumps({"query": query, "numResults": n,
+                                 "contents": {"text": {"maxCharacters": 1000}}}).encode(),
+                headers={
+                    "x-api-key": cfg["exa_api_key"],
+                    "Content-Type": "application/json",
+                    "User-Agent": USER_AGENT_SHORT,
+                }, method="POST")
+            with _build_opener("https://api.exa.ai").open(exa_req, timeout=timeout) as r:
+                data = json.loads(r.read().decode("utf-8", errors="ignore"))
+            for item in (data.get("results", []) or [])[:n]:
+                raw_results.append({
+                    "title": item.get("title", ""),
+                    "url": item.get("url", ""),
+                    "snippet": item.get("text", "") or item.get("summary", ""),
+                })
+            engine_used = "Exa"
+        except Exception as e:
+            tried_engines.append("Exa")
+            print(f"[web_search] Exa 引擎失败，回退内置: {e}", file=sys.stderr)
+
+    # ── Firecrawl 搜索（海外，1000次/月免费）──
+    if not raw_results and provider == "firecrawl" and cfg.get("firecrawl_api_key"):
+        try:
+            fc_req = urllib.request.Request(
+                "https://api.firecrawl.dev/v1/search",
+                data=json.dumps({"query": query, "limit": n}).encode(),
+                headers={
+                    "Authorization": f"Bearer {cfg['firecrawl_api_key']}",
+                    "Content-Type": "application/json",
+                    "User-Agent": USER_AGENT_SHORT,
+                }, method="POST")
+            with _build_opener("https://api.firecrawl.dev").open(fc_req, timeout=timeout) as r:
+                data = json.loads(r.read().decode("utf-8", errors="ignore"))
+            for item in (data.get("data", []) or [])[:n]:
+                raw_results.append({
+                    "title": item.get("title", ""),
+                    "url": item.get("url", ""),
+                    "snippet": item.get("description", ""),
+                })
+            engine_used = "Firecrawl"
+        except Exception as e:
+            tried_engines.append("Firecrawl")
+            print(f"[web_search] Firecrawl 引擎失败，回退内置: {e}", file=sys.stderr)
 
     # ── Brave Search API ──
     if provider == "brave" and cfg.get("brave_api_key"):
@@ -774,8 +861,9 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
                     })
             if raw_results:
                 engine_used = "Firecrawl"
-        except Exception:
-            pass
+        except Exception as e:
+            tried_engines.append("Firecrawl")
+            print(f"[web_search] Firecrawl 引擎失败，回退内置: {e}", file=sys.stderr)
 
     # ── SerpAPI (Google) ──
     if not raw_results and provider == "serpapi" and cfg.get("serpapi_api_key"):
@@ -829,7 +917,7 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
                     snippet = snippet[:600] + ' [...]'
                 if title and url:
                     raw_results.append({"title": title, "url": url, "snippet": snippet})
-            engine_used = "Bing"
+            engine_used = "→".join(tried_engines + ["Bing"]) if tried_engines else "Bing"
         except Exception:
             pass
 
@@ -923,7 +1011,7 @@ def web_search(work_dir: str, query: str, allowed_domains: str = "",
     if not filtered:
         return (f"(未找到与 \"{query}\" 相关的结果。建议:\n"
                 f"  1. 使用更通用的搜索词\n"
-                f"  2. 在 settings.json 中配置 web_search.provider 为 brave/serpapi/tavily\n"
+                f"  2. 在 settings.json 中配置 web_search.provider 为 zhipu/tavily/brave/exa/firecrawl\n"
                 f"  3. 检查网络连接)")
 
     # ── 内容增强: 并行抓取前 2 条结果的页面内容 ──

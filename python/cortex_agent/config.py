@@ -241,11 +241,14 @@ def create_default_settings(path: str) -> dict:
             },
         },
         "web_search": {
-            "provider": "duckduckgo",       # duckduckgo | brave | serpapi | tavily
+            "provider": "bing",             # bing内置免费 | zhipu | tavily | brave | serpapi | exa | firecrawl
             "brave_api_key": "",             # Brave Search API key (https://brave.com/search/api/)
             "serpapi_api_key": "",           # SerpAPI key (https://serpapi.com/)
             "tavily_api_key": "",            # Tavily API key (https://tavily.com/)
-            "max_results": 5,
+            "zhipu_api_key": "",             # 智谱联网搜索 key (https://open.bigmodel.cn/)
+            "exa_api_key": "",               # Exa key (https://exa.ai/)
+            "firecrawl_api_key": "",         # Firecrawl key (https://firecrawl.dev/)
+            "max_results": 15,
             "timeout": 10,
         },
         "max_steps": 0,
@@ -361,11 +364,14 @@ def create_default_settings(path: str) -> dict:
     }
   },
   "web_search": {
-    "provider": "duckduckgo",                 // duckduckgo | brave | serpapi | tavily
+    "provider": "bing",                       // bing内置免费 | zhipu | tavily | brave | serpapi | exa | firecrawl
     "brave_api_key": "",                      // Brave Search API key
     "serpapi_api_key": "",                    // SerpAPI key
     "tavily_api_key": "",                     // Tavily API key
-    "max_results": 5,                         // 搜索结果数量
+    "zhipu_api_key": "",                      // 智谱联网搜索 key
+    "exa_api_key": "",                        // Exa key
+    "firecrawl_api_key": "",                  // Firecrawl key
+    "max_results": 15,                        // 搜索结果数量
     "timeout": 10                             // 搜索超时（秒）
   },
   

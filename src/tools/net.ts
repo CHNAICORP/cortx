@@ -55,7 +55,8 @@ async function httpRequest(url: string, method = 'GET', body?: string, timeout =
       const existingHeaders = options.headers as Record<string, string>;
       options.headers = {
         ...existingHeaders,
-        'Content-Type': 'application/x-www-form-urlencoded',
+        // 调用方已指定 Content-Type（如 JSON API）则不覆盖；默认 urlencoded
+        ...(existingHeaders['Content-Type'] ? {} : { 'Content-Type': 'application/x-www-form-urlencoded' }),
         'Content-Length': Buffer.byteLength(body).toString(),
       };
     }
@@ -174,7 +175,7 @@ registry.register(
       const { loadSettings } = await import("../config.js");
       wsCfg = (loadSettings().web_search as Record<string, unknown>) || {};
     } catch { /* use defaults */ }
-    const provider = String(wsCfg.provider || "duckduckgo");
+    const provider = String(wsCfg.provider || "bing");
     const n = maxResultsArg > 0 ? maxResultsArg : Number(wsCfg.max_results || 15);
     const timeout = Number(wsCfg.timeout || 8) * 1000;
     const blocked = ["bing.com", "duckduckgo.com", "google.com", "baidu.com", "csdn.net"];
@@ -187,6 +188,78 @@ registry.register(
 
     let rawResults: SearchItem[] = [];
     let engineUsed = "";
+    // 引擎尝试链：配置的 API 引擎失败回退时，在结果中可见完整路径（如 "Zhipu→Bing"）
+    const triedEngines: string[] = [];
+    const noteFallback = (name: string) => { triedEngines.push(name); };
+
+    // ── 智谱联网搜索（国内直连，0.01元/次，用户配了 key 才用）──
+    if (provider === "zhipu" && wsCfg.zhipu_api_key) {
+      try {
+        const data = await httpRequest(
+          "https://open.bigmodel.cn/api/paas/v4/web_search",
+          "POST",
+          JSON.stringify({ search_engine: "search_std", search_query: query, count: n, content_size: "medium" }),
+          timeout,
+          { "Authorization": `Bearer ${wsCfg.zhipu_api_key}`, "Content-Type": "application/json" },
+        );
+        const json = JSON.parse(data);
+        if (json.error) throw new Error(`智谱 API 错误 ${json.error.code || ""}: ${json.error.message || ""}`);
+        for (const item of ((json.search_result || []) as Array<Record<string, string>>).slice(0, n)) {
+          // title 兜底（个别条目缺 title），link 缺失才跳过
+          const link = item.link || item.url || "";
+          if (link) {
+            rawResults.push({ title: item.title || item.media || "(未命名)", url: link, snippet: item.content || "" });
+          }
+        }
+        // 智谱已返回结果（哪怕 1 条）就使用，不回退 Bing
+        if (rawResults.length > 0) {
+          engineUsed = "Zhipu";
+        } else if ((json.search_result || []).length > 0) {
+          // 返回了条目但全部缺 link — 罕见，记录后回退
+          noteFallback("Zhipu"); console.error(`[web_search] Zhipu 返回 ${(json.search_result || []).length} 条但均缺 link，回退内置`);
+        }
+      } catch (e) { noteFallback("Zhipu"); console.error("[web_search] Zhipu 引擎失败，回退内置: " + (e instanceof Error ? e.message : String(e))); }
+    }
+
+    // ── Exa 搜索（海外，注册送 $20 额度）──
+    if (!rawResults.length && provider === "exa" && wsCfg.exa_api_key) {
+      try {
+        const data = await httpRequest(
+          "https://api.exa.ai/search",
+          "POST",
+          JSON.stringify({ query, numResults: n, contents: { text: { maxCharacters: 1000 } } }),
+          timeout,
+          { "x-api-key": String(wsCfg.exa_api_key), "Content-Type": "application/json" },
+        );
+        const json = JSON.parse(data);
+        for (const item of ((json.results || []) as Array<Record<string, string>>).slice(0, n)) {
+          if (item.title && item.url) {
+            rawResults.push({ title: item.title, url: item.url, snippet: item.text || item.summary || "" });
+          }
+        }
+        engineUsed = "Exa";
+      } catch (e) { noteFallback("Exa"); console.error("[web_search] Exa 引擎失败，回退内置: " + (e instanceof Error ? e.message : String(e))); }
+    }
+
+    // ── Firecrawl 搜索（海外，1000次/月免费）──
+    if (!rawResults.length && provider === "firecrawl" && wsCfg.firecrawl_api_key) {
+      try {
+        const data = await httpRequest(
+          "https://api.firecrawl.dev/v1/search",
+          "POST",
+          JSON.stringify({ query, limit: n }),
+          timeout,
+          { "Authorization": `Bearer ${wsCfg.firecrawl_api_key}`, "Content-Type": "application/json" },
+        );
+        const json = JSON.parse(data);
+        for (const item of ((json.data || []) as Array<Record<string, string>>).slice(0, n)) {
+          if (item.title && item.url) {
+            rawResults.push({ title: item.title, url: item.url, snippet: item.description || "" });
+          }
+        }
+        engineUsed = "Firecrawl";
+      } catch (e) { noteFallback("Firecrawl"); console.error("[web_search] Firecrawl 引擎失败，回退内置: " + (e instanceof Error ? e.message : String(e))); }
+    }
 
     // ── Brave Search API（用户配了 key 才用）──
     if (provider === "brave" && wsCfg.brave_api_key) {
@@ -274,7 +347,7 @@ registry.register(
       };
       // ensearch=1 对中文搜索质量最好（避免 cn.bing.com 拆词问题）
       rawResults = await searchBing(`https://cn.bing.com/search?q=${encoded}&ensearch=1&setlang=en`);
-      engineUsed = "Bing";
+      engineUsed = triedEngines.length > 0 ? triedEngines.join("→") + "→Bing" : "Bing";
     }
 
     // ── DuckDuckGo Instant Answer API (JSON — 备用，需代理) ──
@@ -344,7 +417,7 @@ registry.register(
     if (!filtered.length) {
       return `(未找到与 "${query}" 相关的结果。请尝试:\n`
         + `1. 使用更通用的搜索词\n`
-        + `2. 在 settings.json 中配置 web_search.provider 为 brave/serpapi/tavily 并填入 API key\n`
+        + `2. 在 settings.json 中配置 web_search.provider 为 zhipu/tavily/brave/exa/firecrawl 并填入对应 API key\n`
         + `3. 检查网络连接是否正常)`;
     }
 
