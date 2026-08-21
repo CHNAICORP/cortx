@@ -11,6 +11,7 @@ import { CortexAgent, LLMProvider } from '../core/loop.js';
 import { registry } from '../core/registry.js';
 import { loadSettings, getApiKey, getBaseUrl } from '../config.js';
 import { Terminal } from './terminal.js';
+import { rawSession, rlClosed, bindMainRl } from './ask_panel.js';
 
 // Register tools (lazy import to avoid circular deps)
 async function loadTools(): Promise<void> {
@@ -112,38 +113,7 @@ function renderSessionRow(
  * - 非 TTY 环境直接返回 undefined（由调用方走默认逻辑）
  */
 
-/** readline 的 closed 标志（类型定义未暴露，运行时存在） */
-function rlClosed(rl: readline.Interface): boolean {
-  return (rl as unknown as { closed?: boolean }).closed === true;
-}
-
-/** raw 按键会话：暂停主 rl 并暂存/摘除 stdin 的全部 keypress 监听（含 readline 内部的），
- *  防止 raw 会话按键泄漏进主 rl —— 字符混入行缓冲 / Enter 产生伪 line 事件 /
- *  Ctrl+C 触发 readline 无 SIGINT 监听时的默认 close()（后者导致 ERR_USE_AFTER_CLOSE 崩溃）。
- *  结束时恢复监听并 resume 主 rl。 */
-function rawSession(rl: readline.Interface): {
-  onKey: (h: (str: string, key: { name?: string; ctrl?: boolean; meta?: boolean }) => void) => void;
-  end: () => void;
-} {
-  const saved = process.stdin.listeners("keypress").slice();
-  saved.forEach(l => process.stdin.removeListener("keypress", l));
-  rl.pause();
-  readline.emitKeypressEvents(process.stdin);
-  const handlers: Array<(str: string, key: { name?: string; ctrl?: boolean; meta?: boolean }) => void> = [];
-  const hadRaw = typeof process.stdin.setRawMode === "function";
-  if (hadRaw) process.stdin.setRawMode(true);
-  process.stdin.resume();
-  return {
-    onKey: h => { handlers.push(h); process.stdin.on("keypress", h); },
-    end: () => {
-      handlers.forEach(h => process.stdin.removeListener("keypress", h));
-      if (hadRaw) process.stdin.setRawMode(false);
-      // raw 会话期间若外部已关闭 rl（如退出流程），不再恢复，避免 ERR_USE_AFTER_CLOSE
-      saved.forEach(l => { if (!rlClosed(rl)) process.stdin.on("keypress", l); });
-      if (!rlClosed(rl)) rl.resume();
-    },
-  };
-}
+/** raw 按键会话与 rlClosed 已移至 ask_panel.ts 统一维护（AskUserPanel 共用同一套隔离机制） */
 
 /** 行输入（可退格编辑）。ESC/Ctrl+C 返回 null。与主 rl 按键隔离（rawSession）。 */
 function askInput(rl: readline.Interface, prompt: string): Promise<string | null> {
@@ -948,6 +918,8 @@ async function main(): Promise<void> {
       return [[], line];
     },
   });
+  // 绑定主 rl：AskUserPanel（ask_user 工具）的 raw 会话需要 pause/resume 主 rl 做按键隔离
+  bindMainRl(rl);
   const modeLabels: Record<string, string> = { standard: "🛡", auto: "✎", yolo: "⚠" };
   const modeColors: Record<string, string> = { standard: "\x1b[38;5;82m", auto: "\x1b[38;5;220m", yolo: "\x1b[38;5;196m" };
 

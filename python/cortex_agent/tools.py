@@ -1323,20 +1323,28 @@ def forget_fact(work_dir: str, name: str) -> str:
 # ══════════════════════════════════════════════════════════════
 
 @registry.register(
-    "向用户提问并获取回答。当需要用户确认、选择或提供信息时使用。\n"
-    "在非交互模式（管道/CI）下会自动返回默认提示。",
+    "弹出交互式询问面板（AskUserPanel）向用户提问并收集回答，支持一次最多 4 个问题。\n"
+    "每个问题可提供 2-6 个选项（单选/多选）或省略选项让用户自由输入文本。\n"
+    "questions_json 是 JSON 数组字符串，每个元素:\n"
+    "  {\"question\": \"完整问题(必填)\", \"header\": \"短标签(可选,≤12字)\", \"multiSelect\": false,\n"
+    "   \"options\": [{\"label\": \"选项文本\", \"description\": \"选项说明(可选)\"}]}\n"
+    "用法: ask_user(questions_json='[{\"question\":\"用哪种部署方式?\",\"header\":\"部署\",\"options\":[{\"label\":\"Docker\"},{\"label\":\"PM2\"}]}]')\n"
+    "仅当真正需要用户决策且无法从上下文推断时使用。用户取消(ESC)或非交互模式会返回相应标记，此时应自行决策并继续，不要重复调用。",
     risk=RiskLevel.SAFE, capability=Capability.FS_READ)
-def ask_user(work_dir: str, question: str) -> str:
-    # 尝试通过全局工具上下文进行交互
+def ask_user(work_dir: str, questions_json: str) -> str:
+    # 通过全局工具上下文弹出 AskUserPanel（见 ask_panel.py）
     try:
         from .tool_context import get_tool_context
-        ctx = get_tool_context()
-        if ctx.get("askUser"):
-            import asyncio
-            return asyncio.get_event_loop().run_until_complete(ctx["askUser"](question))
-    except Exception:
-        pass
-    return f"[需要用户确认] {question}"
+        handler = get_tool_context().get("askUserPanel")
+        if handler:
+            res = handler(questions_json)
+            if hasattr(res, "__await__"):  # 兼容协程 handler
+                import asyncio
+                return asyncio.get_event_loop().run_until_complete(res)
+            return str(res)
+    except Exception as e:
+        return f"(x) 询问面板异常: {e}"
+    return f"[需要用户确认] {questions_json}"
 
 
 @registry.register("用 Python AST 检查 Python 代码语法错误", risk=RiskLevel.SAFE, capability=Capability.FS_READ)

@@ -207,9 +207,19 @@ class ToolExecutor:
         fn = self.reg.get(name)
         if not fn: return f"(x) 未知工具: {name}"
         try:
-            clean = {k: v for k, v in args.items() if k != "work_dir"}
-            # camelCase 别名归一化：接受 TS 风格参数名，转为本工具的 snake_case
-            clean = {self._CAMEL_ALIASES.get(k, k): v for k, v in clean.items()}
+            # snake_case ↔ camelCase 别名：schema 暴露 snake_case，LLM 若规范化成
+            # camelCase 传回（tasksJson）也归一到规范 snake 名（tasks_json）。
+            # 与 TS 不同，Python 工具是严格签名（无 **kwargs），只能保留一个规范名。
+            import re as _re
+            clean = {}
+            for k, v in args.items():
+                if k == "work_dir":
+                    continue
+                k1 = self._CAMEL_ALIASES.get(k, k)
+                if k1 == k and "_" not in k1 and any(c.isupper() for c in k1):
+                    k1 = _re.sub(r"([A-Z])", lambda m: "_" + m.group(1).lower(), k1)
+                if k1 not in clean:
+                    clean[k1] = v
             result = fn(self.work_dir, **clean)
             result = str(result) if not isinstance(result, str) else result
             return self._truncate(result)
@@ -1150,17 +1160,13 @@ class CortexAgent:
         from .tool_context import set_tool_context
         import threading
 
-        def ask_user_handler(question: str) -> str:
+        def ask_user_panel_handler(questions_json: str) -> str:
             if self._non_interactive or not self._term:
-                return f"[非交互模式] {question}"
+                from .ask_panel import non_interactive_result
+                return non_interactive_result(questions_json)
             self._term._end_reasoning()
-            print(f"\n  {self._term.CYAN}💬 Agent 提问:{self._term.RESET} {question}")
-            try:
-                print(f"  {self._term.GRAY}> {self._term.RESET}", end="", flush=True)
-                ans = input()
-                return ans.strip() or "(用户未输入)"
-            except Exception:
-                return "(用户未响应)"
+            from .ask_panel import run_ask_user_panel
+            return run_ask_user_panel(questions_json)
 
         def spawn_subagent_handler(task: str, model: str = "",
                                    tools: str = "", skill: str = "") -> str:
@@ -1268,7 +1274,7 @@ class CortexAgent:
         set_tool_context({
             "workDir": self.config.work_dir,
             "nonInteractive": self._non_interactive,
-            "askUser": ask_user_handler,
+            "askUserPanel": ask_user_panel_handler,
             "spawnSubagent": spawn_subagent_handler,
             "spawnSubagents": spawn_subagents_handler,
             "skillManager": self.skill_mgr,

@@ -10,8 +10,8 @@
 import type { SkillManager } from './skills.js';
 
 export interface ToolContext {
-  /** 向用户提问并获取回答（交互模式） */
-  askUser?: (question: string) => Promise<string>;
+  /** 弹出 AskUserPanel 询问面板并收集回答（非交互模式返回标记文本） */
+  askUserPanel?: (questionsJson: string) => string | Promise<string>;
   /** 生成单个子代理执行独立任务（支持工具过滤 + 技能预加载） */
   spawnSubagent?: (task: string, model?: string, tools?: string, skill?: string) => Promise<string>;
   /** 并行派遣多个子代理（fan-out），tasks_json 为 JSON 数组字符串 */

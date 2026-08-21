@@ -20,6 +20,7 @@ import { SkillManager } from './skills.js';
 import { HookManager } from './hooks.js';
 import { setToolContext, getToolContext } from './tool_context.js';
 import { SubagentTerminal, SubagentToolCall } from '../cli/terminal.js';
+import { runAskUserPanel, nonInteractiveAskResult } from '../cli/ask_panel.js';
 import { setToolTimeout } from '../tools/exec.js';
 
 // Terminal color shortcuts for inline rendering
@@ -463,13 +464,25 @@ export class ToolExecutor {
     const fn = this.reg.get(name);
     if (!fn) return `(x) 未知工具: ${name}`;
     try {
-      // snake_case 别名：同时保留原始 key 和 camelCase 别名，
-      // 这样无论工具读 args["allowed_domains"] 还是 args["allowedDomains"] 都能找到。
+      // snake_case ↔ camelCase 别名：同时保留原始 key 和两种风格的别名，
+      // 这样无论 LLM 按 schema 传 snake_case（tasks_json）还是规范化成
+      // camelCase（tasksJson），工具都能读到。
       const normArgs: Record<string, unknown> = {};
+      const aliases = new Map<string, string>();
+      for (const [k, v] of Object.entries(args)) {
+        const alias = ToolExecutor.SNAKE_ALIASES[k];
+        if (alias && alias !== k) aliases.set(k, alias);
+        // 通用双向转换：snake_case → camelCase / camelCase → snake_case
+        const alt = k.includes("_")
+          ? k.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase())
+          : k.replace(/[A-Z]/g, (c: string) => "_" + c.toLowerCase());
+        if (alt !== k) aliases.set(k, alt);
+      }
       for (const [k, v] of Object.entries(args)) {
         normArgs[k] = v;
-        const alias = ToolExecutor.SNAKE_ALIASES[k];
-        if (alias && alias !== k) normArgs[alias] = v;
+        const alias = aliases.get(k);
+        // 别名只补缺失 key，不覆盖其他参数已占用的名字
+        if (alias && normArgs[alias] === undefined) normArgs[alias] = v;
       }
       const result = fn(this.workDir, normArgs);
       if (result instanceof Promise) {
@@ -686,20 +699,12 @@ this._skillMgr = new SkillManager(this.config.workDir);
       nonInteractive: this._nonInteractive,
       agentConfig: this.config as unknown as Record<string, unknown>,
       skillManager: this._skillMgr ?? undefined,
-      askUser: async (question: string): Promise<string> => {
+      askUserPanel: async (questionsJson: string): Promise<string> => {
         if (this._nonInteractive || !this.term) {
-          return `[非交互模式] ${question}`;
+          return nonInteractiveAskResult(questionsJson);
         }
         this.term.closeThinking();
-        process.stdout.write(`\n  \x1b[36m💬 Agent 提问:\x1b[0m ${question}\n  \x1b[90m> \x1b[0m`);
-        try {
-          const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-          const ans = await new Promise<string>(resolve => rl.question('', resolve));
-          rl.close();
-          return ans.trim() || "(用户未输入)";
-        } catch {
-          return "(用户未响应)";
-        }
+        return await runAskUserPanel(questionsJson);
       },
       spawnSubagent: async (task: string, model?: string, tools?: string, skill?: string): Promise<string> => {
         const label = skill ? `[${skill}] ${task}` : task;

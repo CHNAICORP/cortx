@@ -65,18 +65,23 @@ registry.register("删除记忆", RiskLevel.SAFE, Capability.FS_WRITE,
 );
 
 registry.register(
-  "向用户提问并获取回答。当需要用户确认、选择或提供信息时使用。\n"
-  + "在非交互模式（管道/CI）下会自动返回默认提示。",
+  "弹出交互式询问面板（AskUserPanel）向用户提问并收集回答，支持一次最多 4 个问题。\n"
+  + "每个问题可提供 2-6 个选项（单选/多选）或省略选项让用户自由输入文本。\n"
+  + "questions_json 是 JSON 数组字符串，每个元素:\n"
+  + "  {\"question\": \"完整问题(必填)\", \"header\": \"短标签(可选,≤12字)\", \"multiSelect\": false,\n"
+  + "   \"options\": [{\"label\": \"选项文本\", \"description\": \"选项说明(可选)\"}]}\n"
+  + "用法: ask_user(questions_json='[{\"question\":\"用哪种部署方式?\",\"header\":\"部署\",\"options\":[{\"label\":\"Docker\"},{\"label\":\"PM2\"}]}]')\n"
+  + "仅当真正需要用户决策且无法从上下文推断时使用。用户取消(ESC)或非交互模式会返回相应标记，此时应自行决策并继续，不要重复调用。",
   RiskLevel.SAFE, Capability.FS_READ,
-  { workDir: "string", question: "string" },
+  { workDir: "string", questions_json: "string" },
   async function ask_user(_wd: string, args: Record<string, unknown>): Promise<string> {
-    const question = String(args["question"] || "");
+    const questionsJson = String(args["questions_json"] ?? args["questionsJson"] ?? "");
     const ctx = getToolContext();
-    if (ctx.askUser) {
-      return await ctx.askUser(question);
+    if (ctx.askUserPanel) {
+      return await ctx.askUserPanel(questionsJson);
     }
     // fallback: 没有设置交互回调
-    return `[需要用户确认] ${question}`;
+    return `[需要用户确认] ${questionsJson}`;
   },
 );
 
